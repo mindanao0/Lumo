@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+launcher_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+project_dir="$(dirname -- "$(dirname -- "$launcher_path")")"
+exec "$project_dir/run.sh" "$@"

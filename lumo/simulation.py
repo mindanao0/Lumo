@@ -112,6 +112,6 @@ class Traffic:
     def status(self) -> str:
         name, _, unknown = SCENARIOS[self.mode]
         if unknown:
-            return f"{name.upper()} · stays in ANIMA, then fades"
+            return f"{name.upper()} · stays in LUMO, then fades"
         return f"{name.upper()} · {len(self.packets)} sample packets"
 

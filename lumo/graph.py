@@ -1,4 +1,4 @@
-"""Deterministic node graph and GPU-ready geometry for ANIMA."""
+"""Deterministic node graph and GPU-ready geometry for LUMO."""
 from __future__ import annotations
 
 from collections import deque
@@ -46,11 +46,11 @@ GROUPS = (
     Group("process", "PROCESSES", (.23, .82), (.13, .105), 104, (.74, .57, 1.0)),
     Group("network", "NETWORK", (.12, .48), (.095, .12), 96, (.35, .87, .94)),
 )
-ANIMA_GROUP = len(GROUPS)
+LUMO_GROUP = len(GROUPS)
 PORTS_PER_GROUP = 24
 
 
-def anima_point(u: float, v: float, time: float = 0.0, activity: float = 0.0) -> tuple[float, float, float]:
+def lumo_point(u: float, v: float, time: float = 0.0, activity: float = 0.0) -> tuple[float, float, float]:
     """Map a torus surface coordinate to the screen; all core nodes use this map."""
     twist = v + 3.0 * u + time * .07
     tube = .285 + .04 * math.sin(3.0 * u - time * .65) + activity * .035 * math.sin(5.0 * u - time * 1.3)
@@ -62,7 +62,7 @@ def anima_point(u: float, v: float, time: float = 0.0, activity: float = 0.0) ->
 
 
 class NodeGraph:
-    """Subsystem meshes connected by many curved links to ANIMA's own node mesh."""
+    """Subsystem meshes connected by many curved links to LUMO's own node mesh."""
 
     def __init__(self, seed: int = 20261009) -> None:
         self.rng = random.Random(seed)
@@ -74,7 +74,7 @@ class NodeGraph:
         self.ports: list[list[tuple[int, int]]] = []
         self.hub_nodes: list[int] = []
         self._make_groups()
-        self._make_anima_mesh()
+        self._make_lumo_mesh()
         self._join_device_ports()
 
     def _node(self, x: float, y: float, z: float, group: int, phase: float, u: float = 0.0, v: float = 0.0) -> int:
@@ -116,21 +116,21 @@ class NodeGraph:
                     previous = ids[:offset]
                     self._edge(node_id, min(previous, key=lambda other: self._distance(node_id, other)), "local")
 
-    def _make_anima_mesh(self) -> None:
+    def _make_lumo_mesh(self) -> None:
         # 6 x 64 vertices form the torus itself; links and packets run on this surface.
         self.hub_nodes = []
         for layer in range(6):
             v = layer / 6 * TAU
             for i in range(64):
                 u = i / 64 * TAU
-                x, y, z = anima_point(u, v)
-                self.hub_nodes.append(self._node(x, y, z, ANIMA_GROUP, 0.0, u, v))
+                x, y, z = lumo_point(u, v)
+                self.hub_nodes.append(self._node(x, y, z, LUMO_GROUP, 0.0, u, v))
         for layer in range(6):
             for i in range(64):
                 here = self.hub_nodes[layer * 64 + i]
-                self._edge(here, self.hub_nodes[layer * 64 + (i + 1) % 64], "anima")
-                self._edge(here, self.hub_nodes[((layer + 1) % 6) * 64 + i], "anima")
-                self._edge(here, self.hub_nodes[((layer + 1) % 6) * 64 + (i + 1) % 64], "anima")
+                self._edge(here, self.hub_nodes[layer * 64 + (i + 1) % 64], "lumo")
+                self._edge(here, self.hub_nodes[((layer + 1) % 6) * 64 + i], "lumo")
+                self._edge(here, self.hub_nodes[((layer + 1) % 6) * 64 + (i + 1) % 64], "lumo")
 
     def _join_device_ports(self) -> None:
         for group_index, group in enumerate(GROUPS):
@@ -144,9 +144,9 @@ class NodeGraph:
                 theta = angle + (i / (PORTS_PER_GROUP - 1) - .5) * 1.8
                 ring = int(round(theta / TAU * 64)) % 64
                 layer = i % 6
-                anima_node = self.hub_nodes[layer * 64 + ring]
-                self._edge(device_node, anima_node, "bridge")
-                ports.append((device_node, anima_node))
+                lumo_node = self.hub_nodes[layer * 64 + ring]
+                self._edge(device_node, lumo_node, "bridge")
+                ports.append((device_node, lumo_node))
             self.ports.append(ports)
 
     def _distance(self, a: int, b: int) -> float:
@@ -189,7 +189,7 @@ class NodeGraph:
             entry_node, entry_hub = self.rng.choice(self.ports[target_group])
             route.extend(self.path(current_node, exit_node, current_group)[1:])
             route.append(exit_hub)
-            route.extend(self.path(exit_hub, entry_hub, ANIMA_GROUP)[1:])
+            route.extend(self.path(exit_hub, entry_hub, LUMO_GROUP)[1:])
             route.append(entry_node)
             current_node = self.rng.choice(self.group_nodes[target_group])
             route.extend(self.path(entry_node, current_node, target_group)[1:])
@@ -201,7 +201,7 @@ class NodeGraph:
             previous = -1
             at = exit_hub
             for _ in range(20):
-                choices = [n for n in self.adjacency[at] if self.nodes[n].group == ANIMA_GROUP and n != previous]
+                choices = [n for n in self.adjacency[at] if self.nodes[n].group == LUMO_GROUP and n != previous]
                 next_node = self.rng.choice(choices)
                 route.append(next_node)
                 previous, at = at, next_node
@@ -211,27 +211,27 @@ class NodeGraph:
 
     def point(self, node_id: int, time: float, activity: float) -> tuple[float, float, float]:
         node = self.nodes[node_id]
-        if node.group == ANIMA_GROUP:
-            return anima_point(node.u, node.v, time, activity)
+        if node.group == LUMO_GROUP:
+            return lumo_point(node.u, node.v, time, activity)
         # Small coherent cloud motion; subsystem nodes do not orbit the core.
         return node.x + .0015 * math.sin(time * .55 + node.phase), node.y + .0015 * math.cos(time * .60 + node.phase), node.z
 
     def edge_curve(self, a: int, b: int, time: float, activity: float):
         """Return a curve that meets its graph nodes exactly at t=0 and t=1."""
         na, nb = self.nodes[a], self.nodes[b]
-        if na.group == ANIMA_GROUP and nb.group == ANIMA_GROUP:
+        if na.group == LUMO_GROUP and nb.group == LUMO_GROUP:
             du = math.atan2(math.sin(nb.u - na.u), math.cos(nb.u - na.u))
             dv = math.atan2(math.sin(nb.v - na.v), math.cos(nb.v - na.v))
-            return lambda f: anima_point(na.u + du * f, na.v + dv * f, time, activity)
+            return lambda f: lumo_point(na.u + du * f, na.v + dv * f, time, activity)
         p, q = self.point(a, time, activity), self.point(b, time, activity)
         if na.group == nb.group:
             return lambda f: tuple(p[i] + (q[i] - p[i]) * f for i in range(3))
-        reversed_link = na.group == ANIMA_GROUP
+        reversed_link = na.group == LUMO_GROUP
         if reversed_link:
             a, b, na, nb, p, q = b, a, nb, na, q, p
         surface = self.nodes[b]
-        tangent = anima_point(surface.u + .065, surface.v, time, activity)
-        origin = anima_point(surface.u, surface.v, time, activity)
+        tangent = lumo_point(surface.u + .065, surface.v, time, activity)
+        origin = lumo_point(surface.u, surface.v, time, activity)
         dx, dy = q[0] - p[0], q[1] - p[1]
         length = math.hypot(dx, dy)
         tlen = math.hypot(tangent[0] - origin[0], tangent[1] - origin[1]) or 1.0

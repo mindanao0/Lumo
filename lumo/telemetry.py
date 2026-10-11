@@ -11,6 +11,14 @@ import psutil
 
 
 @dataclass
+class ProcessReading:
+    pid: int
+    name: str
+    cpu: float
+    memory: float
+
+
+@dataclass
 class Snapshot:
     cpu: float = 0.0
     cores: list[float] = field(default_factory=list)
@@ -19,11 +27,15 @@ class Snapshot:
     swap_used: float = 0.0
     disk_read: float = 0.0
     disk_write: float = 0.0
+    storage_percent: float = 0.0
+    storage_used: float = 0.0
+    storage_total: float = 0.0
     net_down: float = 0.0
     net_up: float = 0.0
     gpu: float | None = None
     gpu_name: str = "GPU sensor unavailable"
     processes: list[tuple[str, float, float]] = field(default_factory=list)
+    process_details: list[ProcessReading] = field(default_factory=list)
     updated: float = 0.0
 
 
@@ -39,7 +51,7 @@ class LocalTelemetry:
         self._gpu_future: Future | None = None
         self._gpu_value: float | None = None
         self._gpu_name = "GPU sensor unavailable"
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="anima-gpu")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lumo-gpu")
         self._nvidia_smi = shutil.which("nvidia-smi")
         psutil.cpu_percent(interval=None, percpu=True)
 
@@ -57,6 +69,9 @@ class LocalTelemetry:
         swap = psutil.swap_memory()
         snap.ram_used, snap.ram_total = memory.used, memory.total
         snap.swap_used = swap.used
+        storage = psutil.disk_usage("/")
+        snap.storage_percent = storage.percent
+        snap.storage_used, snap.storage_total = storage.used, storage.total
         io = psutil.disk_io_counters()
         net = psutil.net_io_counters()
         counters = (io.read_bytes if io else 0, io.write_bytes if io else 0,
@@ -66,23 +81,29 @@ class LocalTelemetry:
             delta = [max(0, after - before) / elapsed for before, after in zip(self._last_counters, counters)]
             snap.disk_read, snap.disk_write, snap.net_down, snap.net_up = delta
         self._last_counters, self._last_counter_time = counters, now
-        snap.processes = self._processes()
+        snap.process_details = self._process_details()
+        snap.processes = [(p.name, p.cpu, p.memory) for p in snap.process_details[:8]]
         snap.updated = now
         self.snapshot = snap
         self._schedule_gpu_read()
         return self.snapshot
 
     @staticmethod
-    def _processes() -> list[tuple[str, float, float]]:
+    def _process_details() -> list[ProcessReading]:
         found = []
-        for proc in psutil.process_iter(("name", "memory_info", "cpu_percent")):
+        for proc in psutil.process_iter(("pid", "name", "memory_info", "cpu_percent")):
             try:
                 info = proc.info
                 memory = info["memory_info"].rss if info.get("memory_info") else 0
-                found.append((info.get("name") or "process", float(info.get("cpu_percent") or 0), float(memory)))
+                found.append(ProcessReading(info["pid"], info.get("name") or "process",
+                                            float(info.get("cpu_percent") or 0), float(memory)))
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
-        return sorted(found, key=lambda item: item[1], reverse=True)[:5]
+        return sorted(found, key=lambda item: (item.cpu, item.memory), reverse=True)
+
+    @staticmethod
+    def _processes() -> list[tuple[str, float, float]]:
+        return [(p.name, p.cpu, p.memory) for p in LocalTelemetry._process_details()[:8]]
 
     def _schedule_gpu_read(self) -> None:
         if self._nvidia_smi and (self._gpu_future is None or self._gpu_future.done()):
