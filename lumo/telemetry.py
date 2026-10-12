@@ -16,6 +16,7 @@ class ProcessReading:
     name: str
     cpu: float
     memory: float
+    cpu_ready: bool = True
 
 
 @dataclass
@@ -37,6 +38,7 @@ class Snapshot:
     processes: list[tuple[str, float, float]] = field(default_factory=list)
     process_details: list[ProcessReading] = field(default_factory=list)
     updated: float = 0.0
+    cpu_ready: bool = False
 
 
 class LocalTelemetry:
@@ -46,6 +48,8 @@ class LocalTelemetry:
         self.refresh_seconds = refresh_seconds
         self.snapshot = Snapshot()
         self._last_poll = 0.0
+        self._cpu_ready = False
+        self._seen_processes: set[tuple[int, float]] = set()
         self._last_counters = None
         self._last_counter_time = time.monotonic()
         self._gpu_future: Future | None = None
@@ -64,6 +68,8 @@ class LocalTelemetry:
         snap = Snapshot()
         snap.gpu, snap.gpu_name = self._gpu_value, self._gpu_name
         snap.cpu = psutil.cpu_percent(interval=None)
+        snap.cpu_ready = self._cpu_ready
+        self._cpu_ready = True
         snap.cores = psutil.cpu_percent(interval=None, percpu=True)
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
@@ -88,22 +94,25 @@ class LocalTelemetry:
         self._schedule_gpu_read()
         return self.snapshot
 
-    @staticmethod
-    def _process_details() -> list[ProcessReading]:
+    def _process_details(self) -> list[ProcessReading]:
         found = []
+        seen = set()
         for proc in psutil.process_iter(("pid", "name", "memory_info", "cpu_percent")):
             try:
                 info = proc.info
                 memory = info["memory_info"].rss if info.get("memory_info") else 0
+                identity = (info["pid"], proc.create_time())
+                seen.add(identity)
                 found.append(ProcessReading(info["pid"], info.get("name") or "process",
-                                            float(info.get("cpu_percent") or 0), float(memory)))
+                                            float(info.get("cpu_percent") or 0), float(memory),
+                                            identity in self._seen_processes))
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+        self._seen_processes = seen
         return sorted(found, key=lambda item: (item.cpu, item.memory), reverse=True)
 
-    @staticmethod
-    def _processes() -> list[tuple[str, float, float]]:
-        return [(p.name, p.cpu, p.memory) for p in LocalTelemetry._process_details()[:8]]
+    def _processes(self) -> list[tuple[str, float, float]]:
+        return [(p.name, p.cpu, p.memory) for p in self._process_details()[:8]]
 
     def _schedule_gpu_read(self) -> None:
         if self._nvidia_smi and (self._gpu_future is None or self._gpu_future.done()):

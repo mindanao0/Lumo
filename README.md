@@ -1,13 +1,34 @@
 # LUMO — live process light
 
-LUMO visualizes points of light from live program groups and the remaining
-background processes entering one large circular vortex. Each packet
-is born at its source, approaches on a curved path, smoothly joins circulation,
-and makes 2.2–2.8 complete revolutions before a gradual 5–7 phase-second fade.
-It keeps circulating throughout that fade. Live activity scales the presentation
-clock, so elapsed wall time varies with load. The incoming particle population forms the
-visible ring; no independent opaque ring mesh or permanent connecting cables
-are drawn. The central opening contains a crystal without text.
+LUMO reads local device and process telemetry and renders GPU light currents.
+The default program view restores the design used before the image-reference
+experiments: loose light clouds for running programs and a diffuse central flow.
+The central cloud fills an ellipsoid with circular cross sections, curved light
+paths and a density that fades toward its boundary, avoiding straight slab edges
+as it rotates. It rotates freely in 3D using a quaternion orientation. Drag the
+cloud to set its angle; `O` toggles automatic rotation and `R` resets the angle.
+The light scene fills the window. Each of its six permanent cloud positions has
+three plain text lines: program name, CPU percentage of the whole machine, and
+RAM percentage of total machine memory (summed resident memory for that group).
+Each surrounding cloud rotates slowly and breathes gently about its fixed
+anchor, with an individual phase and smoothly integrated activity response.
+Labels stay anchored and all motion freezes when paused.
+There are no floating cards, sidebar, top instrumentation band or bottom dock.
+Unknown readings show a dash; values use one decimal place. Closing groups fade
+with their labels while packets already in flight finish their journeys.
+
+Use Space to pause, O to toggle automatic rotation, A to toggle live colors,
+R to reset the angle and F for fullscreen. The cloud can still be rotated by
+dragging. Inter names pair with Source Code Pro percentages, with font fallbacks.
+
+Run `lumo --view process` explicitly for this view. It is also the default when
+launching without options, and `--max-apps` controls its visible program groups.
+
+## Experimental connected system view
+
+The reference-based device constellations and spiral core remain available with
+`lumo --view connected`. This experiment has no bottom status band, charts or
+process table. It is not the default view.
 
 ## Live sources and readings
 
@@ -17,33 +38,46 @@ forms an additional group after two successive sensor polls. Groups form and
 fade over three seconds; transient processes and zero-resident-memory kernel
 workers stay in `other processes`. Existing
 programs retain their positions and colors when other apps open, close, or change
-CPU ranking. By default up to 13 named program groups can be visible; overflow
+CPU ranking. By default up to five named program groups can be visible; overflow
 remains in `other processes` and can be promoted when space becomes available.
 
 Closing a program stops new particle births. Its cloud fades, while particles
-already in flight or circulating keep their original source color and finish
+already in flight or crossing keep their original source color and finish
 their lifetime. The renderer retains these draining particles after their visible
 slot is reused. Reopening the same program preserves its cached color and starts
 a new birth interval. This is process-name grouping, not a count of desktop windows.
-Main sources show measured aggregate CPU %, resident memory in MiB, and PID
-count; additional compact sources show CPU %. CPU is the sum of process percentages and may exceed 100% for work on
-multiple cores. Memory is summed resident memory across the group's PIDs.
+All sources show compact name / CPU% / RAM% labels without card backgrounds.
+CPU sums the member PIDs and divides by logical CPU count; RAM sums resident
+memory and divides by machine RAM. Unprimed readings show a dash.
 
-Higher program CPU activity increases the visible contribution of its source hue.
-A small resident-process glow keeps idle but present programs visible. Device
-CPU, GPU, RAM, network, and storage readings remain as plain numbers at the top.
-The system GPU/network counters are not attributed to individual programs.
-All particles illustrate activity; they are not traces of actual data packets.
-There are no metric cards, gauges, or bottom status strip.
+Program CPU sets a target live packet population (20 + 1000 × its machine CPU
+fraction). Births per second compensate for travel time: target population ×
+current speed / 14, with a quiet floor of 0.25. Dust is distributed across and along the packet so its added points remain
+visible rather than only increasing bloom. Each packet contains 36 dust
+points and 12 wake points. Expired slots are excluded from drawing. Flow speed
+uses a separate range (0.16 + 2.6 × sqrt(fraction)).
+RAM changes the source cloud size, never its traffic rate. Births are scheduled
+on the CPU and their coherent positions and wakes are evaluated on the GPU.
+An ambient central volume responds to measured whole-machine CPU/GPU activity,
+without assigning total GPU usage to individual programs.
+A small resident-process glow keeps idle programs visible. The system GPU and
+network counters are not attributed to individual programs. Particles illustrate
+activity rather than tracing literal data packets. Packet lifetime covers the complete arrival, crossing and fade, divided by the
+source speed at birth. Quiet particles persist roughly 74–101 seconds; busy
+work crosses sooner in proportion to its measured CPU fraction. Existing programs start with a populated
+particle volume, and the central ambient density has a stable floor so the
+rounded shape stays visible at both low and high CPU/GPU load.
 
 ## GPU rendering
 
-Static buffers hold particle phase, source lane, wake age, and deterministic seeds.
-GLSL evaluates the complete source-to-ring lifetime and grazing highlights on the
-GPU. A cubic arrival path matches the circulation tangent at capture, so the same
+Dynamic packet pools hold birth phase, source lane, expiry, wake age and seeds.
+GLSL evaluates the complete source-to-volume lifetime and soft light on the
+GPU. A cubic arrival path matches the crossing velocity at capture, so the same
 particle continues through the junction. Fading wakes share their head's lifetime
-and source hue. The canonical circular envelope stays fixed while internal
-currents travel and fold through depth.
+and source hue. Small smooth noise variations move the interior without large changes to the outline.
+Particles span parallel lanes and depths, with no forced central aperture. Incoming
+paths match the tangent of the evolving current. Source speeds ease over roughly
+1.2 seconds; even idle programs retain a very slow resident drift.
 
 A 4× multisampled RGBA16F HDR framebuffer, two scales of Gaussian bloom,
 and filmic compositing preserve sparks and surrounding light. No reference image
@@ -58,7 +92,7 @@ Run from any directory in a graphical Fedora desktop terminal:
 ```bash
 lumo
 lumo --fullscreen
-lumo --max-apps 13 --fps 60
+lumo --max-apps 5 --fps 60
 lumo --help
 ```
 
@@ -115,7 +149,7 @@ retains the window's native resolution. Optional flags include `--fps`,
 
 The second command needs a graphical OpenGL session and writes
 `artifacts/cinematic-verification.json`. It checks actual GPU vertices for
-single winding, circular outlines, packet origins, smooth capture, attached wakes, and frozen
+forward-only crossings, coherent neighbouring velocities, bounded paths through the centre, packet origins, smooth capture, attached wakes, and frozen
 positions while paused. It also checks HDR values and resizing, and measures
 actual source hue and brightness changes under controlled process CPU fixtures,
 separate from real capture telemetry. The third command launches and terminates
@@ -125,3 +159,19 @@ readings, and saves screenshots and a report under `artifacts/live-apps`.
 Geometry and the color field are in `lumo/shaders.py`, program aggregation in `lumo/process_sources.py`, activity normalization
 in `lumo/activity.py`, rendering and labels in `lumo/gpu_view.py`, and local
 sensor readings in `lumo/telemetry.py`.
+
+## Capture review
+
+Record a real baseline, CPU workers, a resident 512 MiB allocation, disk writes, and recovery:
+
+```bash
+.venv/bin/python tools/capture_demo.py --output artifacts/connected-system --warmup-seconds 4 --seconds-per-mode 10 --activity-demo
+```
+
+The recording uses live sensors throughout and labels each stage. The script
+terminates its own workers between stages and also cleans them up on exit.
+The disk stage repeatedly writes and syncs one owned temporary file, which is
+removed after the recording. No global device counters are assigned to an app.
+The capture report includes machine-normalized CPU, raw core CPU, and measured
+source/shared visual clock speeds. Recording and rendering themselves contribute
+to the observed CPU/GPU load.

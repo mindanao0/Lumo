@@ -10,15 +10,16 @@ from lumo.showcase import SCENES, ShowcaseState
 
 def main() -> int:
     parser=argparse.ArgumentParser(prog="lumo", description="LUMO: live GPU particle flow from running programs")
-    parser.add_argument("--max-apps",type=int,default=13,choices=range(1,14),metavar="1-13",help="Maximum visible program groups (default: 13); remaining work is aggregated")
+    parser.add_argument("--max-apps",type=int,default=5,choices=range(1,6),metavar="1-5",help="Visible program clouds (default: 5); remaining programs share one cloud")
     parser.add_argument("--fullscreen",action="store_true",help="Start fullscreen")
     parser.add_argument("--fps",type=int,default=60,help="Frame rate limit (default: 60)")
+    parser.add_argument("--view",choices=("connected","process"),default="process",help="Program flow (default) or experimental system constellation")
     args=parser.parse_args()
     if not 1<=args.fps<=240:
         parser.error("--fps must be between 1 and 240")
     state = ShowcaseState()
     try:
-        view = GpuView(state,max_apps=args.max_apps,fullscreen=args.fullscreen)
+        view = GpuView(state,max_apps=args.max_apps,fullscreen=args.fullscreen,connected=args.view=="connected")
     except Exception as exc:
         print("LUMO could not create an OpenGL window. Install a Fedora Mesa/NVIDIA/AMD OpenGL driver and run from a graphical desktop.", file=sys.stderr)
         print(f"OpenGL error: {exc}", file=sys.stderr)
@@ -32,6 +33,7 @@ def main() -> int:
         while running:
             dt = min(clock.tick(args.fps) / 1000.0, max(.25,1./args.fps))
             for event in pygame.event.get():
+                view.handle_event(event)
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:

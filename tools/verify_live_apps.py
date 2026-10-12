@@ -18,7 +18,7 @@ def main() -> None:
     folder=Path("artifacts/live-apps")
     folder.mkdir(parents=True,exist_ok=True)
     state=ShowcaseState()
-    view=GpuView(state)
+    view=GpuView(state,connected=False)
     child=None
     clock=pygame.time.Clock()
     try:
@@ -60,14 +60,14 @@ def main() -> None:
             if source.closed_at is not None and source.opacity<.01:
                 break
         assert source.closed_at is not None and source.opacity<.01,"Closed process cloud did not fade"
-        assert source in view.process_sources.sources and source.render_emission>0.,"Circulating light was dropped on close"
+        assert source in view.process_sources.sources and source.render_emission>0.,"In-flight light was dropped on close"
         for live in view.process_sources.sources:
             if live.name in baseline and live.closed_at is None:
                 assert (live.slot,live.color)==baseline[live.name],"An existing program changed identity"
         capture("closed.png")
         report={"real_process_pid":child.pid,"name":"LUMO_PROBE","new_group_slot":slot,
                 "source_color":color,"live_open_and_close_verified":True,
-                "closed_cloud_opacity":source.opacity,"circulating_particles_retained":True,
+                "closed_cloud_opacity":source.opacity,"in_flight_particles_retained":True,
                 "existing_positions_and_colors_preserved":True}
         (folder/"verification.json").write_text(json.dumps(report,indent=2)+"\n")
         print(json.dumps(report,indent=2))

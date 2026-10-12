@@ -39,12 +39,16 @@ class ProcessSource:
     stopped_flow: float | None = None
     opacity: float = 1.
     cloud_enabled: bool = True
+    flow_clock: float = 0.
+    flow_speed: float = .15
+    cpu_ready: bool = True
 
-    def measure(self, members: list[ProcessReading]) -> None:
+    def measure(self, members: list[ProcessReading], logical_cpus: int = 1) -> None:
         self.pids = tuple(sorted(p.pid for p in members))
         self.cpu = sum(_positive(p.cpu) for p in members)
+        self.cpu_ready = bool(members) and any(p.cpu_ready for p in members)
         self.memory = sum(_positive(p.memory) for p in members)
-        self.emission = (.20+.80*self.cpu/(self.cpu+25.)) if members else 0.
+        self.emission = min(1.,self.cpu/(100.*max(1,logical_cpus))) if members and self.cpu_ready else 0.
 
 
 @dataclass
@@ -71,15 +75,24 @@ class ProcessSources:
         color = self._colors.setdefault(name, SOURCE_COLORS[slot])
         self._slots[name] = slot
         source = ProcessSource(name, slot=slot, color=color, born_at=now-3. if initial else now,
-                               born_flow=flow-40. if initial else flow, opacity=1. if initial else 0.)
+                               born_flow=flow-40. if initial else flow, opacity=1. if initial else 0., flow_clock=flow)
         self._live[name] = source
         return source
 
     def update(self, readings: list[ProcessReading], *, now: float | None = None,
                flow_time: float | None = None, sampled_at: float | None = None,
-               instant_emission: bool = False) -> list[ProcessSource]:
+               instant_emission: bool = False, logical_cpus: int = 1, source_speeds: dict[str, float] | None = None) -> list[ProcessSource]:
         now = time.monotonic() if now is None else now
         flow = now if flow_time is None else flow_time
+        dt = 0. if self._last_frame is None else max(0.,now-self._last_frame)
+        speed_blend = 1.-math.exp(-dt/1.2)
+        for source in self.sources:
+            if source_speeds is None:
+                source.flow_clock = flow
+            else:
+                target = source_speeds.get(source.name,.15)
+                source.flow_speed += (target-source.flow_speed)*speed_blend
+                source.flow_clock += dt*source.flow_speed
         fresh = sampled_at is None or sampled_at != self._last_sample
         if fresh:
             self._last_sample = sampled_at
@@ -92,14 +105,14 @@ class ProcessSources:
                 sum(_positive(p.memory) for p in groups[name])), reverse=True)
             eligible = {name for name,members in groups.items() if any(_positive(p.memory)>0. for p in members)}
             if not self._initialized and groups:
-                chosen = [name for name in self.names if name in eligible] if self.names else [name for name in ranked if name in eligible][:min(5,self.max_apps)]
+                chosen = [name for name in self.names if name in eligible] if self.names else [name for name in ranked if name in eligible][:self.max_apps]
                 for slot, name in zip(APP_SLOTS[:self.max_apps], chosen):
                     self._create(name, slot, now, flow, True)
                 self._initialized = True
             elif self._initialized:
                 for name, source in list(self._live.items()):
                     if name not in groups:
-                        source.closed_at, source.stopped_flow = now, flow
+                        source.closed_at, source.stopped_flow = now, source.flow_clock
                         source.pids, source.cpu, source.memory, source.emission = (), 0., 0., 0.
                         self._retiring.append(source)
                         del self._live[name]
@@ -133,16 +146,15 @@ class ProcessSources:
                     del self._pending[name]
             self._previous = {name: {p.pid for p in members} for name,members in groups.items() if name in eligible}
             for name, source in self._live.items():
-                source.measure(groups[name])
+                source.measure(groups[name],logical_cpus)
                 if source.opacity == 0. or instant_emission:
                     source.render_emission = source.emission
             if self._background is None:
                 self._background = ProcessSource("other processes",slot=5,color=SOURCE_COLORS[5],born_flow=flow-40.)
-            self._background.measure([p for name,members in groups.items() if name not in self._live for p in members])
+            self._background.measure([p for name,members in groups.items() if name not in self._live for p in members],logical_cpus)
             if self._last_frame is None or instant_emission:
                 self._background.render_emission = self._background.emission
 
-        dt = 0. if self._last_frame is None else max(0.,now-self._last_frame)
         self._last_frame = now
         blend = 1.-math.exp(-dt*1.8)
         for source in self._live.values():
@@ -150,7 +162,7 @@ class ProcessSources:
             source.render_emission += (source.emission-source.render_emission)*blend
         for source in self._retiring:
             source.opacity = 1.-_ease((now-source.closed_at)/CLOUD_FADE_SECONDS) if source.cloud_enabled else 0.
-        self._retiring = [source for source in self._retiring if flow-source.stopped_flow < PARTICLE_DRAIN_SECONDS]
+        self._retiring = [source for source in self._retiring if source.flow_clock-source.stopped_flow < PARTICLE_DRAIN_SECONDS]
         if self._background is not None:
             self._background.render_emission += (self._background.emission-self._background.render_emission)*blend
         self.sources = sorted([*self._live.values(),*self._retiring,*([self._background] if self._background else [])],key=lambda source: source.slot)

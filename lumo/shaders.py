@@ -2,72 +2,146 @@
 
 PARTICLE_VERTEX = r"""
 #version 120
-uniform float uTime, uFlowTime, uAspect, uScale, uGlow;
-uniform float uEntry,uBand,uEmission;
+uniform float uTime, uFlowTime, uParticleTime, uAspect, uScale, uGlow;
+uniform float uEntry,uBand,uEmission,uShapeActivity,uShapeDrift;
 uniform float uBirthTime,uStopTime,uCloudAlpha,uCloudScale;
-uniform int uKind,uReactive;
+uniform int uKind,uReactive,uConnected;
 uniform float uLoads[6];
 uniform vec2 uCenter;
+uniform mat3 uCoreRotation;
+uniform float uCanvasFraction,uWorldScale;
 uniform vec3 uCool, uWarm, uNodeColor;
 varying vec3 vColor;
 varying float vAlpha;
 varying float vSpark;
 vec3 rx(vec3 p,float a) {return vec3(p.x,cos(a)*p.y-sin(a)*p.z,sin(a)*p.y+cos(a)*p.z);}
 vec3 ry(vec3 p,float a) {return vec3(cos(a)*p.x+sin(a)*p.z,p.y,-sin(a)*p.x+cos(a)*p.z);}
+float hash3(vec3 p) {
+    p=fract(p*.1031);
+    p+=dot(p,p.yzx+33.33);
+    return fract((p.x+p.y)*p.z);
+}
+float softNoise(vec3 p) {
+    vec3 cell=floor(p),f=fract(p);
+    f=f*f*f*(f*(f*6.-15.)+10.);
+    return mix(mix(mix(hash3(cell),hash3(cell+vec3(1,0,0)),f.x),
+                   mix(hash3(cell+vec3(0,1,0)),hash3(cell+vec3(1,1,0)),f.x),f.y),
+               mix(mix(hash3(cell+vec3(0,0,1)),hash3(cell+vec3(1,0,1)),f.x),
+                   mix(hash3(cell+vec3(0,1,1)),hash3(cell+vec3(1,1,1)),f.x),f.y),f.z)*2.-1.;
+}
 vec3 ribbon(vec3 q) {
+    // A filled cloud volume: radius and depth vary independently of circulation.
+    float t=uFlowTime*.10;
     float u=q.x+uTime*.032;
-    // Circular silhouettes stay fixed; only the surface filaments wind and pleat.
-    float section=3.14159265*q.y+3.*u+.10*sin(6.*u-uTime*.08)
-        +.025*sin(9.*u+q.y*15.707963-uTime*.15);
-    float skin=.295*clamp(q.z,0.,1.);
-    float bend=section+.22*sin(3.*u+section)*sin(section);
-    float radius=.535+skin*cos(bend);
-    float wave=sin(section);
-    float sweepAngle=u+.18*sin(3.*u+section)*(wave*wave)*clamp(q.z,0.,1.);
-    float folds=.32*sin(section)+.11*sin(3.*u+2.*section-uTime*.07)
-        +.025*sin(6.*u+5.*section-uTime*.12);
-    vec3 p=vec3(radius*cos(sweepAngle),radius*sin(sweepAngle),folds*clamp(q.z,0.,1.));
-    p.xy+=vec2(-.025,0.0);
+    float latitude=clamp(q.y,-.97,.97);
+    float radius=.66*clamp(q.z,0.,1.);
+    float crossSection=sqrt(1.-latitude*latitude);
+    vec3 p=vec3(radius*cos(u)*crossSection,
+                radius*sin(u)*crossSection,radius*latitude*.72);
+    p=rx(p,.35);
+    vec3 field=p*2.0+vec3(t*.3,t*.2,t*.15);
+    float broad=softNoise(field);
+    // Gentle internal currents and breathing; no cut-out centre or sharp folds.
+    p.xy+=.023*vec2(broad,softNoise(field+vec3(2.7,1.4,4.2)))*q.z;
+    p.x*=1.+.035*sin(t*.6);
+    p.y*=.86+.035*cos(t*.5);
+    p.xy+=vec2(-.025+.012*sin(t*.37),.012*cos(t*.43));
     return p;
 }
 
+vec3 connectedCore(vec3 q) {
+    float t=clamp((q.y+1.)*.5,0.,1.);
+    float radius=.035+.48*pow(t,.82);
+    float angle=q.x+radius*7.;
+    vec3 p=vec3(radius*cos(angle),radius*sin(angle)*.65,
+                (q.z-1.)*.55+.045*sin(angle*2.)*t);
+    p=rx(p,.24);
+    p.xy+=vec2(-.025,.10);
+    return p;
+}
+vec3 connectedPath(float age,float lane,float seed) {
+    lane=.85+clamp(lane,-1.,1.)*.1;
+    float arrival=2.8+seed*.9;
+    float speed=.12+seed*.045;
+    float entry=atan(uCenter.y-.10,uCenter.x+.025)-.51*7.;
+    vec3 q=vec3(entry+(seed-.5)*.45,lane,1.);
+    if(age>=arrival) {
+        q.y=-1.+(lane+1.)*exp(-(age-arrival)*speed*.65);
+        return connectedCore(q);
+    }
+    vec3 end=connectedCore(q);
+    vec3 velocity=(connectedCore(q+vec3(.002,0,0))-connectedCore(q-vec3(.002,0,0)))/.004*speed;
+    vec3 start=vec3(uCenter,0.);
+    start.xy+=vec2(sin(seed*83.),cos(seed*71.))*.025;
+    vec2 side=vec2(-(end.y-start.y),end.x-start.x);
+    side*=inversesqrt(max(dot(side,side),.001));
+    vec3 c1=start+(end-start)*.34;
+    c1.xy+=side*(lane*.14+.12);
+    vec3 c2=end-velocity*arrival/3.;
+    float t=clamp(age/arrival,0.,1.),s=1.-t;
+    return s*s*s*start+3.*s*s*t*c1+3.*s*t*t*c2+t*t*t*end;
+}
+
 vec3 station(vec3 q,float seed) {
-    vec3 p=ry(rx(q,.15+uCenter.x*.29),uCenter.y*.73+.12);
+    // Each cloud moves coherently about its fixed anchor, with its own phase.
+    // Integrated source/device time makes activity changes continuous.
+    float phase=uCenter.x*2.1+uCenter.y*3.7+uBand*.9;
+    float clock=uTime*.045+uParticleTime*.08;
+    vec3 p=ry(rx(q,.15+uCenter.x*.29+clock*(.52+.08*cos(phase))),
+                 uCenter.y*.73+.12+clock*(.69+.09*sin(phase)));
+    p*=1.+.035*sin(clock*.8+phase);
+    p.y*=1.+.018*cos(clock*.65+phase);
     p.xy+=vec2(sin(seed*18.0+uTime*.13),cos(seed*21.0+uTime*.12))*.032;
     p.xy=p.xy*uCloudScale+uCenter;
     return p;
 }
 float processArrival(float seed) {return 2.8+seed*.9;}
-float processSpeed(float seed) {return .62+seed*.18;}
-float processOrbitTime(float seed) {
-    // Complete several revolutions before fading; all parts of a packet share this clock.
-    return 6.2831853*(2.2+seed*.6)/processSpeed(seed);
-}
-float processFadeTime(float seed) {return 5.+seed*2.;}
+float processTransitTime(float seed) {return 6.+seed*2.;}
+float processFadeTime(float seed) {return 3.+seed*1.5;}
 float processLifetime(float seed) {
-    return processArrival(seed)+processOrbitTime(seed)+processFadeTime(seed);
+    return processArrival(seed)+processTransitTime(seed)+processFadeTime(seed);
+}
+vec3 processCurrent(float travel,float lane,float seed) {
+    vec2 direction=-uCenter*inversesqrt(max(dot(uCenter,uCenter),.001));
+    vec2 across=vec2(-direction.y,direction.x);
+    float duration=processTransitTime(seed)+processFadeTime(seed);
+    float t=travel/duration;
+    // Circular cross sections and rounded chord ends fill an ellipsoid, not a slab.
+    float radial=.52*pow(clamp((lane+1.)*.5,0.,1.),.78);
+    float angle=seed*6.2831853;
+    float lateral=radial*cos(angle);
+    float depth=radial*sin(angle);
+    float halfChord=sqrt(max(.001,.58*.58-radial*radial));
+    float longitudinal=mix(-halfChord,halfChord,t);
+    float envelope=sin(3.14159265*t);
+    vec3 p=vec3(direction*longitudinal+across*lateral,depth*.88);
+    // Gentle curves preserve a continuous source-to-core trajectory.
+    p.xy+=across*.035*envelope*sin(angle+t*3.14159265);
+    p.z+=.025*envelope*sin(angle*2.+t*6.2831853);
+    vec3 field=p*2.3+vec3(uFlowTime*.025);
+    p+=vec3(softNoise(field),softNoise(field+vec3(3.7,1.2,2.5)),
+             softNoise(field+vec3(1.6,4.2,3.1)))*.018*envelope;
+    p=uCoreRotation*p;
+    p.xy+=vec2(-.025,0.);
+    return p;
 }
 vec3 processPath(float age,float lane,float seed) {
+    if(uConnected==1) return connectedPath(age,lane,seed);
     float arrival=processArrival(seed);
-    float speed=processSpeed(seed);
-    vec3 q=vec3(uEntry-uTime*.032,lane,1.);
-    if(age>=arrival) {
-        float travel=age-arrival;
-        q.x+=travel*speed;
-        q.y+=.035*sin(travel*.7+seed*31.)*smoothstep(0.,2.,travel);
-        return ribbon(q);
-    }
-    vec3 end=ribbon(q);
-    vec3 tangent=(ribbon(q+vec3(.002,0.,0.))-ribbon(q-vec3(.002,0.,0.)))/.004;
+    if(age>=arrival) return processCurrent(age-arrival,lane,seed);
+    vec3 end=processCurrent(0.,lane,seed);
+    vec3 velocity=(processCurrent(.002,lane,seed)-processCurrent(-.002,lane,seed))/.004;
     vec3 start=vec3(uCenter,0.);
-    start.xy+=vec2(sin(seed*83.),cos(seed*71.))* .045;
-    vec2 side=normalize(vec2(-(end.y-start.y),end.x-start.x));
+    start.xy+=vec2(sin(seed*83.),cos(seed*71.))*.045;
+    vec2 side=vec2(-(end.y-start.y),end.x-start.x);
+    side*=inversesqrt(max(dot(side,side),.001));
     vec3 c1=start+(end-start)*.40;
-    c1.xy+=side*lane*.10;
-    vec3 c2=end-tangent*speed*arrival/3.;
+    c1.xy+=side*lane*.06;
+    vec3 c2=end-velocity*arrival/3.;
     float t=clamp(age/arrival,0.,1.),s=1.-t;
     return s*s*s*start+3.*s*s*t*c1+3.*s*t*t*c2+t*t*t*end;
 }
+
 vec3 deviceColor(int i) {
     if(i==0) return vec3(.16,.65,1.);
     if(i==1) return vec3(.14,.91,.86);
@@ -103,10 +177,32 @@ vec4 loadLight(vec3 p) {
 
 void main() {
     vec3 q=gl_Vertex.xyz,p=q;
+    int role=(uKind>=29 && uKind<=31)?uKind-11:uKind;
     float seed=gl_Color.b,alpha=gl_Color.g,size=1.0+seed*1.5,warmth=gl_Color.r;
     float energy=1.0, whiten=seed*.25;
+    float packetTail=(uKind>=29 && uKind<=31)?fract(q.z):q.z;
     vSpark=0.0;
-    if(uKind==0 || uKind==13 || uKind==17) {
+    if(uKind==32) {
+        p=uCoreRotation*q;
+        p.xy+=vec2(-.025,0.);
+        float compute=max(uLoads[0],uLoads[4]);
+        alpha*=(.90+compute*.65)*(1.-smoothstep(.55+.35*compute-.025,.55+.35*compute+.025,seed));
+        size=3.+seed*3.;energy=.80+compute*.8;whiten=.04;vSpark=-1.;
+        warmth=smoothstep(-.3,.3,p.x);
+    } else if(uKind==21 || uKind==22 || uKind==23) {
+        // Points drift inward on spiral arms; the cloud itself keeps a stable pose.
+        if(uKind==23) q.y=2.*fract((q.y+1.)*.5-uFlowTime*.018)-1.;
+        p=connectedCore(q);
+        alpha*=.65+.35*smoothstep(-.12,.12,p.z);
+        warmth=smoothstep(-.30,.35,p.x);
+        energy=uKind==21?.8:1.45;
+        whiten=.08;size=1.2+seed*2.;
+        if(uKind==23) {size=2.5+seed;energy=1.45;whiten=.14;vSpark=1.;}
+    } else if(uKind==24) {
+        p=connectedPath(q.x*(2.8+seed*.9),uBand*.14+q.y,seed);
+        alpha*=.55;
+        energy=1.15;whiten=.045;
+    } else     if(uKind==0 || uKind==13 || uKind==17) {
         if(uKind==13) q.x+=uTime*(.06+seed*.08);
         if(uKind==17) q.x+=uFlowTime*(.32+seed*.36);
         p=ribbon(q);
@@ -170,54 +266,65 @@ void main() {
         float cloudRatio=clamp(uCloudScale/.235,0.,1.);
         alpha*=uCloudAlpha*max(.10,pow(cloudRatio,1.6));
         size*=max(.55,sqrt(cloudRatio));
-    } else if(uKind==18 || uKind==19 || uKind==20) {
+    } else if(role==18 || role==19 || role==20) {
         float life=processLifetime(seed);
-        float headAge=mod(uFlowTime+q.x*life,life);
-        float birthTime=uFlowTime-headAge;
-        float delay=uKind==20?q.z*.52:0.;
-        float age=max(0.,headAge-delay);
-        p=processPath(age,uBand+q.y,seed);
-        float selected=1.-smoothstep(uEmission-.035,uEmission+.035,gl_Color.r);
+        float headAge=uKind>=29?uParticleTime-q.x:mod(uParticleTime+q.x*life,life);
+        float birthTime=uParticleTime-headAge;
+        float delay=role==20?packetTail*.24:0.;
+        float age=clamp(headAge-delay,0.,life+.1);
+        p=processPath(age,uBand*.14+q.y,seed);
+        float selected=uKind>=29?1.:1.-smoothstep(uEmission-.035,uEmission+.035,gl_Color.r);
         float birth=smoothstep(0.,.28,age);
-        float fadeStart=processArrival(seed)+processOrbitTime(seed);
+        float fadeStart=processArrival(seed)+processTransitTime(seed);
         float decay=1.-smoothstep(fadeStart,life,age);
         float front=smoothstep(-.35,.30,p.z);
         alpha*=selected*birth*decay*(.38+.62*front);
-        alpha*=headAge>=delay?1.:0.;
-        // Stop new births when a program closes; already born particles finish their orbit.
-        alpha*=birthTime>=uBirthTime && birthTime<=uStopTime?1.:0.;
-        size=uKind==18?1.4+seed*1.5:4.+seed*4.;
-        energy=uKind==18?1.9:3.0;
-        whiten=uKind==18?.10:.22;
-        if(uKind==18 && age>3.7) {
-            vec3 tangent=processPath(age+.005,uBand+q.y,seed)-p;
-            vec3 across=processPath(age,uBand+q.y+.005,seed)-p;
-            vec3 crossed=cross(tangent,across);
-            vec3 normal=crossed*inversesqrt(max(dot(crossed,crossed),1.e-20));
-            float rim=pow(clamp(1.-abs(normal.z),0.,1.),2.);
-            energy=1.5+rim*3.2;whiten=.08+.28*rim;
+        if(uConnected==1) alpha*=.28;
+        else {
+            vec3 local=(p-vec3(-.025,0.,0.))*uCoreRotation;
+            float distance=length(local/vec3(.60,.60,.53));
+            float density=exp(-1.35*distance*distance)*(1.-smoothstep(.70,1.04,distance));
+            float captured=smoothstep(processArrival(seed)-.30,processArrival(seed)+.40,age);
+            alpha*=mix(1.,density*1.6,captured);
         }
-        if(uKind==19) vSpark=1.;
-        if(uKind==20) {
-            alpha*=pow(1.-q.z,1.5);
-            size=1.4+2.*(1.-q.z);energy=2.1;whiten=.12;
+        alpha*=headAge>=delay?1.:0.;
+        if(uKind>=29) alpha*=1.-smoothstep(floor(q.z)-1.5,floor(q.z),uTime);
+        // Stop new births when a program closes; already born particles finish their crossing.
+        alpha*=birthTime>=uBirthTime && birthTime<=uStopTime?1.:0.;
+        size=role==18?6.+seed*3.:2.3+seed*1.3;
+        energy=role==18?.90:1.15;
+        whiten=.01;
+        // Shared device load lights the volume, without attributing GPU/I/O to an app.
+        float coreMix=smoothstep(processArrival(seed)-.3,processArrival(seed)+.4,age);
+        energy*=mix(1.,.70+1.0*max(uLoads[0],uLoads[4]),coreMix);
+        if(role==18) {
+            alpha*=.16*(.85+.30*uLoads[3]);
+            vSpark=-1.;
+        }
+        if(role==20) {
+            alpha*=.38*pow(1.-packetTail,1.5);
+            size=1.3+1.4*(1.-packetTail);energy=1.15;whiten=.01;
         }
     }
 
-    gl_Position=vec4(p.x/uAspect,p.y,clamp(-p.z*.4,-.9,.9),1.0);
-    gl_PointSize=size*uScale*(uGlow>.5?6.0:1.0);
+    gl_Position=vec4(p.x*uWorldScale/uAspect*uCanvasFraction+uCanvasFraction-1.,p.y*uWorldScale,clamp(-p.z*.4,-.9,.9),1.0);
+    gl_PointSize=size*uScale*(uGlow>.5?(vSpark<-.5?3.0:6.0):1.0);
     vColor=mix(mix(uCool,uWarm,warmth),vec3(.90,.97,1.),whiten)*energy;
     if((uKind==0 || uKind==13 || uKind==15 || uKind==16 || uKind==17) && uReactive==1) {
         vec4 light=loadLight(p);
         vColor=mix(light.rgb,vec3(.90,.97,1.),whiten)*energy*(.75+.65*light.a);
     }
+    if(uKind==21 || uKind==22 || uKind==23) {
+        float sector=mod(q.x+6.2831853,6.2831853)/6.2831853*6.;
+        vColor=mix(deviceColor(int(floor(sector))),vec3(.90,.97,1.),whiten)*energy;
+    }
     if(uKind==11 || uKind==14)
         vColor=mix(uNodeColor,vec3(.93,.98,1.),whiten)*energy;
-    if(uKind==18 || uKind==19 || uKind==20) {
+    if(role==18 || role==19 || role==20 || uKind==24) {
         vec3 sourceColor=uReactive==1?uNodeColor:mix(uCool,uWarm,seed);
         vColor=mix(sourceColor,vec3(.90,.97,1.),whiten)*energy;
     }
-    vAlpha=alpha*(uGlow>.5?.045:.90);
+    vAlpha=alpha*(uGlow>.5?(vSpark<-.5?.08:.045):.90);
 }
 """
 
@@ -245,6 +352,7 @@ void main() {
     }
     if(r>1.0) discard;
     float light=exp(-r*5.5)*.55+exp(-r*28.0)*.9;
+    if(vSpark<-.5) light=exp(-r*3.8)*.55;
     if(vSpark>.5) {
         float rays=(exp(-abs(p.x)*55.)+exp(-abs(p.y)*55.))*exp(-r*3.5);
         light=exp(-r*40.)*2.0+rays*.26+exp(-r*6.)*.24;

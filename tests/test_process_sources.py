@@ -66,6 +66,27 @@ class ProcessSourceTests(unittest.TestCase):
         model.update([],now=36.,flow_time=36.)
         self.assertNotIn(source,model.sources)
 
+    def test_source_clocks_follow_own_load_without_jumping_or_losing_draining_particles(self):
+        model=ProcessSources()
+        readings=[sample(1,"busy",100.),sample(2,"idle",0.)]
+        model.update(readings,now=0.,flow_time=0.,source_speeds={"busy":1.1,"idle":.15})
+        for step in range(1,61):
+            model.update(readings,now=step/10.,flow_time=step/10.,
+                         source_speeds={"busy":1.1,"idle":.15})
+        busy=next(s for s in model.sources if s.name=="busy")
+        idle=next(s for s in model.sources if s.name=="idle")
+        self.assertGreater(busy.flow_clock,idle.flow_clock*4)
+        previous=busy.flow_clock
+        model.update(readings,now=6.,flow_time=100.,source_speeds={"busy":.15,"idle":.15})
+        self.assertEqual(busy.flow_clock,previous)
+        model.update([readings[1]],now=6.1,flow_time=101.,source_speeds={"idle":.15})
+        self.assertEqual(busy.stopped_flow,busy.flow_clock)
+        self.assertIn(busy,model.sources)
+        closing_speed=busy.flow_speed
+        model.update([readings[1]],now=9.,flow_time=104.,source_speeds={"idle":.15})
+        self.assertLess(busy.flow_speed,closing_speed*.4)
+        self.assertIn(busy,model.sources)
+
     def test_transient_process_does_not_get_a_cloud(self):
         model=ProcessSources()
         initial=[sample(1,"editor")]
@@ -113,6 +134,12 @@ class ProcessSourceTests(unittest.TestCase):
         self.assertEqual(active.color,color)
         self.assertEqual(active.born_flow,3.)
         self.assertEqual(active.pids,(2,))
+
+    def test_resident_memory_increases_population_without_cpu_activity(self):
+        small=ProcessSources().update([ProcessReading(1,"worker",0.,16.*2**20)],now=0.)[0]
+        large=ProcessSources().update([ProcessReading(1,"worker",0.,2.*2**30)],now=0.)[0]
+        self.assertGreater(large.emission,small.emission)
+        self.assertEqual(large.flow_speed,small.flow_speed)
 
     def test_cpu_increases_emission_and_invalid_counters_stay_finite(self):
         model=ProcessSources()

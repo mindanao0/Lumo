@@ -2,7 +2,7 @@
 import math
 import unittest
 
-from lumo.activity import device_activity
+from lumo.activity import device_activity, machine_cpu_percent, motion_activity, flow_speed
 from lumo.showcase import ShowcaseState
 from lumo.telemetry import ProcessReading,Snapshot
 
@@ -30,6 +30,20 @@ class DeviceActivityTests(unittest.TestCase):
         values=device_activity(Snapshot(cpu=math.nan,gpu=None,net_up=math.inf,
                                         disk_read=-10.,ram_used=0.,ram_total=0.))
         self.assertTrue(all(math.isfinite(value) and 0.<=value<=1. for value in values))
+
+    def test_group_cpu_uses_whole_machine_capacity(self):
+        self.assertEqual(machine_cpu_percent(200.,8),25.)
+        self.assertEqual(machine_cpu_percent(float('nan'),8),0.)
+        self.assertEqual(machine_cpu_percent(100.,0),100.)
+
+    def test_ram_occupancy_does_not_accelerate_motion(self):
+        idle=device_activity(Snapshot(cores=[0.]*8,ram_total=16.))
+        full=device_activity(Snapshot(cores=[0.]*8,ram_total=16.,ram_used=16.))
+        self.assertEqual(flow_speed(motion_activity(idle)),flow_speed(motion_activity(full)))
+        busy=device_activity(Snapshot(cpu=90.,cores=[0.]*8))
+        gpu=device_activity(Snapshot(gpu=90.,cores=[0.]*8))
+        self.assertGreater(flow_speed(motion_activity(busy)),5*flow_speed(motion_activity(idle)))
+        self.assertEqual(motion_activity(busy),motion_activity(gpu))
 
     def test_default_colors_are_reactive_and_manual_choice_overrides_them(self):
         state=ShowcaseState()

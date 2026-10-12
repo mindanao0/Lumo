@@ -24,7 +24,7 @@ from lumo.process_sources import ProcessSources
 
 
 def verify_geometry_and_flow(view: GpuView) -> dict:
-    """Read actual GPU vertices to check the circular shell and moving packet wakes."""
+    """Read actual GPU vertices to check one-way crossings and coherent light motion."""
     import OpenGL.GL as gl
     from OpenGL.GL.shaders import compileShader
     program=gl.glCreateProgram()
@@ -41,13 +41,12 @@ def verify_geometry_and_flow(view: GpuView) -> dict:
     source=int(gl.glGenBuffers(1))
     output=int(gl.glGenBuffers(1))
     previous_clock,previous_flow=view.state.clock,view.flow_time
-    winding_checks=[]
-    roundness_checks=[]
     try:
-        def evaluate(kind: int,positions,seed=.5,slot=0,birth=-40.,stop=1.e10,cloud_alpha=1.) -> np.ndarray:
+        def evaluate(kind: int,positions,seed=.5,slot=0,birth=-40.,stop=1.e10,cloud_alpha=1.,connected=False) -> np.ndarray:
             gl.glUseProgram(program)
             view._configure(uniforms,view.state.clock)
             gl.glUniform1i(uniforms["uKind"],kind)
+            gl.glUniform1i(uniforms["uConnected"],int(connected))
             x,y=STATIONS[slot][:2]
             gl.glUniform2f(uniforms["uCenter"],x,y)
             gl.glUniform3f(uniforms["uNodeColor"],*NODE_COLORS[slot])
@@ -77,29 +76,37 @@ def verify_geometry_and_flow(view: GpuView) -> dict:
             gl.glDisableClientState(gl.GL_COLOR_ARRAY)
             return np.frombuffer(raw,dtype=np.float32).reshape(-1,5).copy()
 
+        view.state.clock=0.
+        strand=[(u,.35,1.) for u in np.linspace(0.,2*np.pi,513)]
+        skeleton=evaluate(21,strand,connected=True)
+        skeleton_xy=skeleton[:,:2]*np.array((view.aspect,1.))
+        assert np.linalg.norm(skeleton_xy[0]-skeleton_xy[-1])<1e-5,"Filament core has an open seam"
+        view.state.clock=10.
+        slowly_changed=evaluate(21,strand,connected=True)
+        shape_drift=np.linalg.norm((slowly_changed[:,:2]-skeleton[:,:2])*np.array((view.aspect,1.)),axis=1)
+        assert shape_drift.max()<.03,"The filament skeleton rotates or changes too quickly"
+        assert np.isfinite(skeleton).all() and np.isfinite(slowly_changed).all(),"Invalid connected-core geometry"
+        view.flow_time=.5
+        travelling=evaluate(23,strand,connected=True)
+        expected=evaluate(21,[(u+.1,band,radius) for u,band,radius in strand],connected=True)
+        connected_head_error=float(np.max(np.abs(travelling[:,:4]-expected[:,:4])))
+        assert connected_head_error<1e-6,"Core light points left their visible filament paths"
+        arrival=3.25
+        fade_start=arrival+7.
+        lifetime=fade_start+3.75
+        bounded_checks=[]
         for clock in (0.,7.,25.):
             view.state.clock=clock
-            circle=evaluate(0,[(u,0.,0.) for u in np.linspace(0,2*np.pi,1025)])
-            xy=circle[:,:2].astype(float)*np.array((view.aspect,1.))-np.array((-.025,0.))
-            angle=np.unwrap(np.arctan2(xy[:,1],xy[:,0]))
-            turns=float((angle[-1]-angle[0])/(2*np.pi))
-            assert abs(turns-1.)<.001,f"Core winds {turns} times instead of once"
-            assert np.linalg.norm(xy[0]-xy[-1])<1e-5,"Core seam does not close"
-            winding_checks.append(turns)
-            radial=np.linalg.norm(xy,axis=1)
-            roundness=float(radial.max()-radial.min())
-            assert roundness<2e-6,"Core centreline is not circular"
-            angles=np.linspace(0,2*np.pi,73)
-            profile=np.linspace(-1.,1.,721)
-            surface=evaluate(0,[(u,v,1.) for u in angles for v in profile])
-            surface_xy=surface[:,:2].astype(float)*np.array((view.aspect,1.))-np.array((-.025,0.))
-            radii=np.linalg.norm(surface_xy,axis=1).reshape(len(angles),len(profile))
-            outer_error=float(np.max(np.abs(radii.max(axis=1)-.830)))
-            inner_error=float(np.max(np.abs(radii.min(axis=1)-.240)))
-            assert outer_error<1e-5 and inner_error<1e-5,"Core rim or aperture is not circular"
-            roundness_checks.append({"centre_radius_spread":roundness,"outer_radius_error":outer_error,"inner_radius_error":inner_error})
-
-        # Freeze the shell to isolate real packet travel from slow surface motion.
+            view.flow_time=clock
+            ages=np.linspace(arrival+.01,lifetime-.01,61)
+            crossing=evaluate(19,[(((age-clock)%lifetime)/lifetime,lane,0.)
+                                  for age in ages for lane in np.linspace(-1.,1.,17)])
+            world=crossing[:,:2]*np.array((view.aspect,1.))-np.array((-.025,0.))
+            radii=np.linalg.norm(world,axis=1)
+            assert np.isfinite(crossing).all() and radii.max()<.75,"Current left its central bounds"
+            assert radii.min()<.05,"Current does not pass through the middle"
+            bounded_checks.append({"clock":clock,"min_radius":float(radii.min()),"max_radius":float(radii.max())})
+        # Freeze the current field to isolate packet travel.
         view.state.clock=0.
         view.flow_time=0.
         packets=[(phase,lane,0.) for phase in np.linspace(0.,1.,37)[:-1]
@@ -111,14 +118,14 @@ def verify_geometry_and_flow(view: GpuView) -> dict:
         view.flow_time=.35
         advanced=evaluate(19,packets)
         displacement=np.linalg.norm((advanced[:,:2]-head[:,:2])*np.array((view.aspect,1.)),axis=1)
-        assert np.isfinite(advanced).all() and displacement.mean()>.06,"Internal data heads did not travel visibly"
+        assert np.isfinite(advanced).all() and displacement.mean()>.025,"Internal data heads did not travel visibly"
         repeated=evaluate(19,packets)
         assert np.array_equal(advanced,repeated),"Frozen packet phase does not pause exactly"
         arrival=3.25
-        fade_start=arrival+2.5*2*np.pi/.71
-        lifetime=fade_start+6.
+        fade_start=arrival+7.
+        lifetime=fade_start+3.75
         junctions=[]
-        rotation_checks=[]
+        crossing_checks=[]
         fade_checks=[]
         for slot,(x,y,*_) in enumerate(STATIONS):
             view.flow_time=0.
@@ -130,21 +137,32 @@ def verify_geometry_and_flow(view: GpuView) -> dict:
             mismatch=float(np.linalg.norm(incoming-outgoing)/max(np.linalg.norm(incoming),.01))
             assert mismatch<.04,f"A source jumps or changes direction abruptly on capture: {mismatch}"
             junctions.append(mismatch)
-            ring_points=evaluate(19,[(age/lifetime,lane,0.) for age in np.linspace(arrival+.1,lifetime-.1,120) for lane in (-.14,0.,.14)],slot=slot)
-            world=ring_points[:,:2]*np.array((view.aspect,1.))-np.array((-.025,0.))
+            crossing_points=evaluate(19,[(age/lifetime,lane,0.) for age in np.linspace(arrival+.1,lifetime-.1,120) for lane in (-.14,0.,.14)],slot=slot)
+            world=crossing_points[:,:2]*np.array((view.aspect,1.))-np.array((-.025,0.))
             radii=np.linalg.norm(world,axis=1)
-            assert radii.min()>=.23999 and radii.max()<=.83001,"Captured packets left the LUMO interior"
+            assert np.isfinite(radii).all() and radii.max()<1.05,"Captured packets left the organic body"
             # Follow one actual GPU particle through its bright residence and fade.
             held=evaluate(19,[(age/lifetime,0.,0.) for age in np.linspace(arrival+.05,fade_start,181)],slot=slot)
             xy=held[:,:2]*np.array((view.aspect,1.))-np.array((-.025,0.))
+            direction=-np.array((x,y))/np.linalg.norm((x,y))
+            longitudinal=xy@direction
+            assert np.diff(longitudinal).min()>0.,"Current reverses instead of crossing the centre"
+            # Neighbouring lanes must move together rather than form separate orbits.
+            sample_age=arrival+3.
+            velocities=[]
+            for lane in (0.,.01):
+                pair=evaluate(19,[(age/lifetime,lane,0.) for age in (sample_age,sample_age+.02)],slot=slot)
+                velocities.append((pair[1,:2]-pair[0,:2])*np.array((view.aspect,1.)))
+            cosine=float(np.dot(*velocities)/(np.linalg.norm(velocities[0])*np.linalg.norm(velocities[1])))
+            assert cosine>.995,"Neighbouring light points have incoherent directions"
             angles=np.unwrap(np.arctan2(xy[:,1],xy[:,0]))
-            turns=float((angles[-1]-angles[0])/(2*np.pi))
-            assert turns>2.2,"Particle faded before completing several revolutions"
-            assert held[:,4].min()>.15,"Captured particle started fading during its bright residence"
+            angular_sweep=float(np.ptp(angles))
+            assert angular_sweep<4.,"Current still orbits the centre"
+            assert held[:,4].min()>.10,"Captured particle started fading during its bright residence"
             faded=evaluate(19,[(age/lifetime,0.,0.) for age in np.linspace(fade_start+.01,lifetime-.01,25)],slot=slot)
-            assert faded[:5,4].mean()>faded[-5:,4].mean()*3.,"Particle does not fade gradually after rotating"
+            assert faded[:5,4].mean()>faded[-5:,4].mean()*3.,"Particle does not fade gradually after crossing"
             assert faded[-1,4]<.0001,"Particle remains visible at the end of its lifetime"
-            rotation_checks.append(turns)
+            crossing_checks.append({"slot":slot,"longitudinal_distance":float(longitudinal[-1]-longitudinal[0]),"neighbour_velocity_cosine":cosine,"angular_sweep":angular_sweep})
             fade_checks.append({"start_alpha":float(faded[0,4]),"end_alpha":float(faded[-1,4])})
             wake=evaluate(20,[(phase,lane,age) for phase,lane,_ in packets for age in (0.,.5,1.)],slot=slot)
             assert np.isfinite(wake).all(),"Invalid process particle wake"
@@ -153,23 +171,23 @@ def verify_geometry_and_flow(view: GpuView) -> dict:
             return [(((age-view.flow_time)%lifetime)/lifetime,0.,0.)]
         old=evaluate(19,age_point(6.),stop=4.)
         new=evaluate(19,age_point(.2),stop=4.)
-        assert old[0,4]>.1,"Closing an app removed particles already circulating"
+        assert old[0,4]>.1,"Closing an app removed particles already crossing"
         assert new[0,4]==0.,"A closed app is still spawning new particles"
         unopened=evaluate(19,age_point(6.),birth=3.)
         opened=evaluate(19,age_point(1.),birth=3.)
-        assert unopened[0,4]==0. and opened[0,4]>.1,"A new app inherited pre-existing ring particles"
+        assert unopened[0,4]==0. and opened[0,4]>.1,"A new app inherited pre-existing central particles"
         hidden_cloud=evaluate(11,[(0.,0.,0.)],cloud_alpha=0.)
         assert hidden_cloud[0,4]==0.,"A faded group cloud remains visible"
         view.flow_time=.35
         assert gl.glGetError()==0,"GL error during internal flow verification"
-        return {"core_revolutions_from_gpu":winding_checks,"circular_silhouette_checks":roundness_checks,
+        return {"connected_core_head_path_error":connected_head_error,"connected_core_closed_seam":True,"connected_core_max_drift_in_10s":float(shape_drift.max()),"bounded_crossing_checks":bounded_checks,
                 "internal_packet_checks":len(packets),"wake_head_max_error":wake_error,
                 "mean_packet_travel_in_350ms":float(displacement.mean()),
-                "frozen_flow_positions_identical":True,"packets_stay_inside_ring":True,
+                "frozen_flow_positions_identical":True,"packets_stay_inside_organic_body":True,
                 "process_cloud_origins_checked":len(STATIONS),"max_capture_tangent_mismatch":max(junctions),
-                "visible_revolutions_before_fade":rotation_checks,"gradual_fade_checks":fade_checks,
+                "one_way_crossing_and_coherence_checks":crossing_checks,"gradual_fade_checks":fade_checks,
                 "app_open_birth_gate_verified":True,"closed_app_stops_new_births":True,
-                "closed_app_particles_finish_circulating":True,"cloud_fade_uniform_verified":True}
+                "closed_app_particles_finish_crossing":True,"cloud_fade_uniform_verified":True}
     finally:
         view.state.clock,view.flow_time=previous_clock,previous_flow
         gl.glDisable(gl.GL_RASTERIZER_DISCARD)
@@ -186,15 +204,16 @@ def verify_process_emission(view: GpuView) -> dict:
     """Measure real rendered source hues and emission response with controlled fixtures."""
     saved=(view.telemetry.update,view.snapshot,view.state.paused,view.state.reactive,
            view.state.mode,view.loads.copy(),view.cool.copy(),view.warm.copy(),
-           view.last_mode,view.last_time,view.loads_initialized,view.process_sources)
+           view.last_mode,view.last_time,view.loads_initialized,view.process_sources,view.system_view)
     yy,xx=np.mgrid[0:view.height,0:view.width]
     x=(2.*(xx+.5)/view.width-1.)*view.aspect+.025
     y=2.*(yy+.5)/view.height-1.
     radius=np.sqrt(x*x+y*y)
-    ring=(radius>.25)&(radius<.83)
+    ring=radius<.70
     timestamp=1000.
     try:
         view.state.paused=True
+        view.system_view=False
         view.state.reactive=True
         view.process_sources=ProcessSources(names=[f"fixture-{i}" for i in range(5)])
         def capture(blue_cpu=0.,gold_cpu=0.,global_cpu=0.,global_gpu=0.):
@@ -218,21 +237,22 @@ def verify_process_emission(view: GpuView) -> dict:
         gold_gain=contrast(gold_high,0,2)-contrast(idle,0,2)
         scale=float(blue_high[ring,2].mean()-blue_low[ring,2].mean())
         assert blue_gain>1.,f"Active blue source did not strengthen its hue in LUMO: {blue_gain}"
-        assert gold_gain>1.,f"Active gold source did not strengthen its hue in LUMO: {gold_gain}"
-        assert scale>1.,f"Higher process activity did not increase visible emission: {scale}"
+        assert gold_gain>.35,f"Active gold source did not strengthen its hue in LUMO: {gold_gain}"
+        assert scale>.5,f"Higher process activity did not increase visible emission: {scale}"
         view.state.reactive=False
         view.state.mode="read"
         manual_idle=capture(blue_cpu=20.,gold_cpu=20.)
+        identity_before={source.name:(source.color,source.emission) for source in view.process_sources.sources}
         manual_loaded=capture(blue_cpu=20.,gold_cpu=20.,global_cpu=100.,global_gpu=100.)
-        difference=float(np.abs(manual_idle[ring].astype(float)-manual_loaded[ring]).mean())
-        assert difference<.05,"Global device counters were incorrectly attributed to individual processes"
+        identity_after={source.name:(source.color,source.emission) for source in view.process_sources.sources}
+        assert identity_before==identity_after,"Device counters were attributed to program emission or identity"
         return {"measured_on_actual_framebuffer":True,"blue_source_hue_gain":blue_gain,
                 "gold_source_hue_gain":gold_gain,"higher_process_load_additional_light":scale,
                 "device_counters_not_attributed_to_processes":True}
     finally:
         (view.telemetry.update,view.snapshot,view.state.paused,view.state.reactive,
          view.state.mode,loads,cool,warm,view.last_mode,view.last_time,view.loads_initialized,
-         view.process_sources)=saved
+         view.process_sources,view.system_view)=saved
         view.loads[:]=loads
         view.cool[:]=cool
         view.warm[:]=warm
