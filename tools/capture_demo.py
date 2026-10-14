@@ -48,8 +48,8 @@ def main() -> None:
     temp_folder=tempfile.TemporaryDirectory(prefix="lumo-preview-",dir=args.output)
     started = time.monotonic()
     try:
-        view = GpuView(state,connected=args.view=="connected",size=(1920,1080))
-        width, height = view.screen.get_size()
+        view = GpuView(state,connected=args.view=="connected",fullscreen=True)
+        width, height = pygame.display.get_window_size()
         renderer = glGetString(GL_RENDERER).decode()
         version = glGetString(GL_VERSION).decode()
         glPixelStorei(GL_PACK_ALIGNMENT, 1)
