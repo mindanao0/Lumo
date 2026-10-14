@@ -23,14 +23,14 @@ def main():
     snapshots=[];complete=False
     try:
         info=experiment.start();print(json.dumps(info),flush=True)
-        state=ShowcaseState();view=GpuView(state,max_apps=5)
+        state=ShowcaseState();view=GpuView(state,max_apps=5,size=(1920,1080))
         # Owned workloads have named clouds for this experiment only.
         view.process_sources=ProcessSources(names=NAMES,max_apps=5)
         width,height=view.screen.get_size();glPixelStorei(GL_PACK_ALIGNMENT,1)
         encoder=subprocess.Popen(['ffmpeg','-hide_banner','-loglevel','error','-y',
             '-f','rawvideo','-pixel_format','rgb24','-video_size',f'{width}x{height}',
-            '-framerate','30','-i','pipe:0','-an','-vf','vflip,scale=1280:720',
-            '-c:v','libx264','-preset','veryfast','-crf','25','-pix_fmt','yuv420p',
+            '-framerate','30','-i','pipe:0','-an','-vf','vflip',
+            '-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p',
             '-movflags','+faststart',str(output/'lumo-load-experiment.mp4')],stdin=subprocess.PIPE)
         clock=pygame.time.Clock()
         for _ in range(150):

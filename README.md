@@ -50,9 +50,9 @@ All sources show compact name / CPU% / RAM% labels without card backgrounds.
 CPU sums the member PIDs and divides by logical CPU count; RAM sums resident
 memory and divides by machine RAM. Unprimed readings show a dash.
 
-Program CPU sets a target live packet population (20 + 1000 × its machine CPU
+Program CPU sets a target live packet population (24 + 1600 × its machine CPU
 fraction). Births per second compensate for travel time: target population ×
-current speed / 14, with a quiet floor of 0.25. Dust is distributed across and along the packet so its added points remain
+current speed / 22.25, with a quiet floor of 0.25. Dust is distributed across and along the packet so its added points remain
 visible rather than only increasing bloom. Each packet contains 36 dust
 points and 12 wake points. Expired slots are excluded from drawing. Flow speed
 uses a separate range (0.16 + 2.6 × sqrt(fraction)).
@@ -63,7 +63,7 @@ without assigning total GPU usage to individual programs.
 A small resident-process glow keeps idle programs visible. The system GPU and
 network counters are not attributed to individual programs. Particles illustrate
 activity rather than tracing literal data packets. Packet lifetime covers the complete arrival, crossing and fade, divided by the
-source speed at birth. Quiet particles persist roughly 74–101 seconds; busy
+source speed at birth. Quiet particles persist roughly 118–161 seconds; busy
 work crosses sooner in proportion to its measured CPU fraction. Existing programs start with a populated
 particle volume, and the central ambient density has a stable floor so the
 rounded shape stays visible at both low and high CPU/GPU load.
@@ -134,8 +134,8 @@ Capture the current live-load mode from the actual OpenGL framebuffer:
 .venv/bin/python tools/capture_demo.py --output artifacts/live-load --warmup-seconds 2 --seconds-per-mode 12
 ```
 
-FFmpeg is required. The video exports at 1280×720 and 30 fps; the screenshot
-retains the window's native resolution. Optional flags include `--fps`,
+FFmpeg is required. Capture renders at native 1920×1080 and exports at 30 fps
+with H.264 CRF 18; screenshots retain the same resolution. Optional flags include `--fps`,
 `--seconds-per-mode`, `--warmup-seconds`, `--mode read` (manual colors), and
 `--palettes` (all four manual themes).
 

@@ -24,8 +24,8 @@ class CoreRotation:
     def step(self, dt, clock):
         if dt <= 0 or not self.auto or self.drag_start is not None:
             return
-        velocity = np.array((.075+.025*math.sin(clock*.11),
-                             .11+.03*math.cos(clock*.09), .045))
+        velocity = np.array((.14+.025*math.sin(clock*.11),
+                             .22+.03*math.cos(clock*.09), .09))
         speed = np.linalg.norm(velocity)
         half = speed*dt*.5
         delta = np.concatenate(([math.cos(half)], velocity/speed*math.sin(half)))

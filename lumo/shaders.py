@@ -96,8 +96,8 @@ vec3 station(vec3 q,float seed) {
     return p;
 }
 float processArrival(float seed) {return 2.8+seed*.9;}
-float processTransitTime(float seed) {return 6.+seed*2.;}
-float processFadeTime(float seed) {return 3.+seed*1.5;}
+float processTransitTime(float seed) {return 12.+seed*4.;}
+float processFadeTime(float seed) {return 4.+seed*2.;}
 float processLifetime(float seed) {
     return processArrival(seed)+processTransitTime(seed)+processFadeTime(seed);
 }
@@ -121,7 +121,10 @@ vec3 processCurrent(float travel,float lane,float seed) {
     vec3 field=p*2.3+vec3(uFlowTime*.025);
     p+=vec3(softNoise(field),softNoise(field+vec3(3.7,1.2,2.5)),
              softNoise(field+vec3(1.6,4.2,3.1)))*.018*envelope;
-    p=uCoreRotation*p;
+    // Entry stays on the source's side in world space. Rotation takes over
+    // gradually inside the volume instead of dragging the inlet across it.
+    vec3 rotated=uCoreRotation*p;
+    p=mix(p,rotated,smoothstep(0.,.45,t));
     p.xy+=vec2(-.025,0.);
     return p;
 }
@@ -186,9 +189,19 @@ void main() {
         p=uCoreRotation*q;
         p.xy+=vec2(-.025,0.);
         float compute=max(uLoads[0],uLoads[4]);
-        alpha*=(.90+compute*.65)*(1.-smoothstep(.55+.35*compute-.025,.55+.35*compute+.025,seed));
-        size=3.+seed*3.;energy=.80+compute*.8;whiten=.04;vSpark=-1.;
-        warmth=smoothstep(-.3,.3,p.x);
+        alpha*=(.90+compute*.65)*(1.-smoothstep(.28+.64*compute-.025,.28+.64*compute+.025,seed));
+        // Small bright points retain detail instead of merging into soft fog.
+        float front=smoothstep(-.46,.46,p.z);
+        alpha*=.18+1.12*front;
+        // Features stay in object space so rotation is visible on the rounded cloud.
+        float ribbon=.5+.5*sin(atan(q.z,q.x)*2.+q.y*9.);
+        float crest=pow(ribbon,6.);
+        // An asymmetric luminous patch provides a stable point to follow.
+        float landmark=smoothstep(.82,.97,dot(normalize(q+vec3(.0001)),normalize(vec3(.72,.35,.60))));
+        alpha*=.45+1.65*crest+1.25*landmark;
+        if(uGlow>.5) alpha*=.20;
+        size=1.5+seed*1.3;energy=.95+compute*.65;whiten=.08+.20*max(crest,landmark);vSpark=0.;
+        warmth=smoothstep(-.3,.3,q.x);
     } else if(uKind==21 || uKind==22 || uKind==23) {
         // Points drift inward on spiral arms; the cloud itself keeps a stable pose.
         if(uKind==23) q.y=2.*fract((q.y+1.)*.5-uFlowTime*.018)-1.;
@@ -298,8 +311,10 @@ void main() {
         float coreMix=smoothstep(processArrival(seed)-.3,processArrival(seed)+.4,age);
         energy*=mix(1.,.70+1.0*max(uLoads[0],uLoads[4]),coreMix);
         if(role==18) {
-            alpha*=.16*(.85+.30*uLoads[3]);
-            vSpark=-1.;
+            size=mix(size,1.6+seed*1.2,coreMix);
+            alpha*=mix(.16,.32,coreMix)*(.85+.30*uLoads[3]);
+            if(uGlow>.5) alpha*=mix(1.,.18,coreMix);
+            vSpark=coreMix>.5?0.:-1.;
         }
         if(role==20) {
             alpha*=.38*pow(1.-packetTail,1.5);
@@ -407,7 +422,7 @@ void main() {
     c+=(texture2D(uSource,vUV+uStep*3.230769).rgb+texture2D(uSource,vUV-uStep*3.230769).rgb)*.070270;
     if(uExtract==1) {
         float peak=max(c.r,max(c.g,c.b));
-        c*=smoothstep(.20,.95,peak);
+        c*=smoothstep(.40,1.20,peak);
     }
     gl_FragColor=vec4(c,1.0);
 }
@@ -422,7 +437,7 @@ void main() {
     vec3 scene=texture2D(uScene,vUV).rgb;
     vec3 nearGlow=texture2D(uBloom,vUV).rgb;
     vec3 farGlow=texture2D(uWide,vUV).rgb;
-    vec3 color=film(scene*1.18+nearGlow*.80+farGlow*.55);
+    vec3 color=film(scene*1.18+nearGlow*.42+farGlow*.18);
     // Preserve faint threads without lifting the black background.
     float dark=max(scene.r,max(scene.g,scene.b));
     color=mix(color,scene,.15*(1.-smoothstep(.20,.80,dark)));

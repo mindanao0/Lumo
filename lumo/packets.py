@@ -10,12 +10,12 @@ WAKE_POINTS=12
 def packet_rate(source):
     """Compensate shorter travel time to reach a load-dependent live population."""
     activity=max(0.,min(1.,float(source.render_emission)))
-    target_population=20.+1000.*activity
-    return max(.25,target_population*max(.16,float(source.flow_speed))/14.)
+    target_population=24.+1600.*activity
+    return max(.25,target_population*max(.16,float(source.flow_speed))/22.25)
 
 
 class PacketPool:
-    def __init__(self, source, capacity=1536):
+    def __init__(self, source, capacity=3072):
         self.capacity=capacity
         self.rng=np.random.default_rng(1409+source.slot*113)
         self.positions=np.zeros((capacity,3),dtype=np.float32)
@@ -39,9 +39,9 @@ class PacketPool:
             self.initialized=True
             # Existing programs start with a populated slow cloud, not an empty one.
             if source.pids and source.closed_at is None and source.born_flow<source.flow_clock-20:
-                count=min(self.capacity//2,max(20,int(rate*14./max(.16,source.flow_speed))))
+                count=min(self.capacity//2,max(24,int(rate*22.25/max(.16,source.flow_speed))))
                 for _ in range(count):
-                    seed=self.rng.random();life=11.8+4.4*seed
+                    seed=self.rng.random();life=18.8+6.9*seed
                     age=self.rng.uniform(0.,life*.80)
                     remaining=(life-age)/max(.16,source.flow_speed)
                     self.positions[self.cursor]=(source.flow_clock-age,self.rng.uniform(-1,1),math.ceil(now+remaining+1.))
@@ -58,7 +58,8 @@ class PacketPool:
             fraction=min(1.,max(0.,(i+1.-previous)/(dt*rate)))
             index=self.cursor
             seed=self.rng.random()
-            lifetime=(11.8+4.4*seed)/max(.16,source.flow_speed)
+            # Match arrival + transit + fade in processLifetime() in the shader.
+            lifetime=(18.8+6.9*seed)/max(.16,source.flow_speed)
             expiry=math.ceil(now-dt+fraction*dt+lifetime+1.)
             self.positions[index]=(start+(source.flow_clock-start)*fraction,self.rng.uniform(-1,1),expiry)
             self.colors[index]=(seed,self.rng.uniform(.45,.90),seed)

@@ -48,7 +48,7 @@ def main() -> None:
     temp_folder=tempfile.TemporaryDirectory(prefix="lumo-preview-",dir=args.output)
     started = time.monotonic()
     try:
-        view = GpuView(state,connected=args.view=="connected")
+        view = GpuView(state,connected=args.view=="connected",size=(1920,1080))
         width, height = view.screen.get_size()
         renderer = glGetString(GL_RENDERER).decode()
         version = glGetString(GL_VERSION).decode()
@@ -57,8 +57,8 @@ def main() -> None:
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
             "-framerate", str(args.fps), "-i", "pipe:0", "-an",
-            "-vf", "vflip,scale=1280:720", "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "25", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-vf", "vflip", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             str(args.output / "lumo-demo.mp4"),
         ], stdin=subprocess.PIPE)
         clock = pygame.time.Clock()

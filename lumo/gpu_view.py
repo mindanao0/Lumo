@@ -38,7 +38,7 @@ SOURCE_BANDS = (-.78,-.47,-.16,.16,.47,.78,-.62,-.31,0.,.31,.62,-.70,.05,.70)
 
 
 class GpuView:
-    def __init__(self, state: ShowcaseState, title: str = "LUMO · SYSTEM", *, max_apps: int = 5, fullscreen: bool = False, connected: bool = False) -> None:
+    def __init__(self, state: ShowcaseState, title: str = "LUMO · SYSTEM", *, max_apps: int = 5, fullscreen: bool = False, connected: bool = False, size: tuple[int, int] = (WIDTH, HEIGHT)) -> None:
         pygame.display.init()
         pygame.font.init()
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
@@ -48,7 +48,10 @@ class GpuView:
         pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 1)
         pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 4)
         flags=pygame.OPENGL | pygame.DOUBLEBUF | (pygame.FULLSCREEN if fullscreen else pygame.RESIZABLE)
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT), flags, vsync=1)
+        if fullscreen:
+            # Match the desktop instead of stretching a fixed 1600x900 image.
+            size = pygame.display.get_desktop_sizes()[0]
+        self.screen = pygame.display.set_mode(size, flags, vsync=1)
         pygame.display.set_caption(title)
         self.state = state
         self.system_view = connected
@@ -74,6 +77,7 @@ class GpuView:
         self.hud_texture = int(glGenTextures(1))
         self.hud_key = None
         self.metric_history={key:deque(maxlen=24) for key in ("cpu","gpu","ram","network","storage","disk")}
+        self.process_history={}
         self.fonts: dict[tuple, pygame.font.Font] = {}
         self.cool = np.array(SCENES[state.mode][1], dtype=np.float32)
         self.warm = np.array(SCENES[state.mode][2], dtype=np.float32)
@@ -250,12 +254,12 @@ class GpuView:
             hub_seeds=local_rng.random(len(hubs))
             self._upload(f"station_sparks_{index}",hubs,np.column_stack((np.ones(len(hubs)),local_rng.uniform(.6,1.,len(hubs)),hub_seeds)))
 
-        ambient=rng.normal(0,1,(5000,3))
+        ambient=rng.normal(0,1,(12000,3))
         ambient/=np.maximum(np.linalg.norm(ambient,axis=1),.001)[:,None]
-        ambient*=rng.random((5000,1))**.5
+        ambient*=rng.random((12000,1))**.5
         ambient*=np.array((.53,.53,.46))
         seeds=rng.random(len(ambient))
-        self._upload("core_ambient",ambient,np.column_stack((seeds,np.full(len(ambient),.10),seeds)))
+        self._upload("core_ambient",ambient,np.column_stack((seeds,np.full(len(ambient),.20),seeds)))
         count=3400
         stars=np.column_stack((rng.uniform(-1.9,1.9,count),rng.uniform(-.79,.96,count),rng.random(count)))
         self._upload("stars",stars,np.column_stack((rng.random(count),rng.uniform(.05,.38,count),rng.random(count))))
@@ -368,6 +372,14 @@ class GpuView:
             self.process_sources.update(self.snapshot.process_details,now=now,flow_time=self.flow_time,
                                         sampled_at=self.snapshot.updated,instant_emission=initializing,logical_cpus=cores,
                                         source_speeds=speeds)
+            if self.snapshot.updated!=old_reading:
+                identities={id(source) for source in self.process_sources.sources}
+                self.process_history={key:history for key,history in self.process_history.items() if key in identities}
+                for source in self.process_sources.sources:
+                    history=self.process_history.setdefault(id(source),deque(maxlen=48))
+                    cpu=machine_cpu_percent(source.cpu,cores)/100. if source.cpu_ready and source.closed_at is None else None
+                    ram=source.memory/self.snapshot.ram_total if self.snapshot.ram_total>0 and source.closed_at is None else None
+                    history.append((cpu,ram))
         self.cool+=(np.array(SCENES[self.state.mode][1])-self.cool)*blend
         self.warm+=(np.array(SCENES[self.state.mode][2])-self.warm)*blend
         glBindFramebuffer(GL_FRAMEBUFFER,self.scene_fbo)
