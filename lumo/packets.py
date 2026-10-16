@@ -7,15 +7,17 @@ DUST_PER_PACKET=36
 WAKE_POINTS=12
 
 
-def packet_rate(source):
+def packet_rate(source, activity=None):
     """Compensate shorter travel time to reach a load-dependent live population."""
-    activity=max(0.,min(1.,float(source.render_emission)))
-    target_population=24.+1600.*activity
+    activity=max(0.,min(1.,float(source.render_emission if activity is None else activity)))
+    if activity <= 0.:
+        return 0.
+    target_population=2800.*activity
     return max(.25,target_population*max(.16,float(source.flow_speed))/22.25)
 
 
 class PacketPool:
-    def __init__(self, source, capacity=3072):
+    def __init__(self, source, capacity=9000):
         self.capacity=capacity
         self.rng=np.random.default_rng(1409+source.slot*113)
         self.positions=np.zeros((capacity,3),dtype=np.float32)
@@ -28,8 +30,8 @@ class PacketPool:
         self.now=0.
         self.active_count=0
 
-    def update(self,source,dt,now):
-        rate=packet_rate(source)
+    def update(self,source,dt,now, *, activity=None, enabled=True):
+        rate=packet_rate(source, activity) if enabled else 0.
         self.now=now
         start=self.last_flow;self.last_flow=source.flow_clock
         alive=int(np.count_nonzero(self.positions[:self.count,2]>now))
@@ -38,8 +40,8 @@ class PacketPool:
         if not self.initialized:
             self.initialized=True
             # Existing programs start with a populated slow cloud, not an empty one.
-            if source.pids and source.closed_at is None and source.born_flow<source.flow_clock-20:
-                count=min(self.capacity//2,max(24,int(rate*22.25/max(.16,source.flow_speed))))
+            if rate > 0. and source.pids and source.closed_at is None and source.born_flow<source.flow_clock-20:
+                count=min(self.capacity//2,int(rate*22.25/max(.16,source.flow_speed)))
                 for _ in range(count):
                     seed=self.rng.random();life=18.8+6.9*seed
                     age=self.rng.uniform(0.,life*.80)
@@ -47,13 +49,16 @@ class PacketPool:
                     self.positions[self.cursor]=(source.flow_clock-age,self.rng.uniform(-1,1),math.ceil(now+remaining+1.))
                     self.colors[self.cursor]=(seed,self.rng.uniform(.45,.90),seed)
                     self.cursor=(self.cursor+1)%self.capacity
-                self.count=count;changed=True
-        if dt<=0 or source.closed_at is not None or not source.pids:
+                self.count=count;self.total_births+=count;changed=True
+        if source.closed_at is not None or not source.pids or not enabled or rate <= 0.:
+            self.credit=0.
+            return changed
+        if dt<=0:
             return changed
         previous=self.credit
         self.credit+=dt*rate
         births=min(self.capacity,int(self.credit))
-        self.credit-=births
+        self.credit-=int(self.credit)
         for i in range(births):
             fraction=min(1.,max(0.,(i+1.-previous)/(dt*rate)))
             index=self.cursor

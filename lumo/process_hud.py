@@ -1,73 +1,79 @@
-"""Minimal percentage labels anchored below the program light clouds."""
-from .activity import machine_cpu_percent
+"""Reference-style labels: slot-colored names with compact numeric rows."""
+import math
 
-INK=(222,237,245)
-QUIET=(136,164,180)
-PROGRAM_NAMES={
-    'other processes':'Other programs',
-    'firefox':'Firefox', 'chrome':'Google Chrome', 'chromium':'Chromium',
-    'gnome-shell':'GNOME Shell', 'code':'Visual Studio Code',
-    'python':'Python', 'python3':'Python', 'codex':'Codex',
-    'pipewire':'PipeWire', 'wireplumber':'WirePlumber',
-    'Xwayland':'Xwayland', 'systemd':'Systemd',
-    'LUMO_LEFT_A':'Left workload A', 'LUMO_LEFT_B':'Left workload B',
-    'LUMO_LEFT_C':'Left workload C', 'LUMO_RIGHT_A':'Right workload A',
-    'LUMO_RIGHT_B':'Right workload B',
-}
+from .process_visuals import build_slots, short_name
+
+INK=(236,243,247)
+QUIET=(150,176,190)
+DASH='—'
+NAME_WIDTH=.19
+EDGE=.012
 
 
 def fitted(view,value,width,size=16):
+    """Ellipsize to `width` (fraction of window width); never alters identities."""
     font=view._font(size,True,'ui')
-    if font.size(value)[0]<=width*view.width:
+    limit=width*view.width
+    if font.size(value)[0]<=limit:
         return value
-    while value and font.size(value+'…')[0]>width*view.width:
+    while value and font.size(value+'…')[0]>limit:
         value=value[:-1]
     return value+'…'
 
 
+def pct(value,digits=1):
+    return DASH if value is None or not math.isfinite(value) else f'{value:.{digits}f}%'
+
+
+def slot_rows(slot):
+    """Numeric rows for one slot; vacant slots show only the dash name."""
+    if not slot.occupied:
+        return []
+    cpu_ram=f'CPU {pct(slot.cpu_percent)}   RAM {pct(slot.ram_percent)}'
+    if slot.role=='gpu':
+        return [f'Machine GPU {pct(slot.gpu_percent,0)}',cpu_ram]
+    if slot.role=='ram':
+        return [f'TOTAL RAM {pct(slot.total_ram_percent)}',f'LUMO {pct(slot.worker_ram_percent)}']
+    return [cpu_ram]
+
+
+def _color(rgb):
+    return tuple(round(max(0.,min(1.,c))*255) for c in rgb)
+
+
+def _center(view,x,texts,size):
+    """Centre x clamped so the widest line stays inside the window."""
+    half=max(view._font(size,False,'data').size(t)[0] for t in texts)/2/view.width
+    return max(EDGE+half,min(1.-EDGE-half,x))
+
+
+def _block(view,slot,name,rows,opacity,name_dy=0.):
+    x,y=slot.label_anchor
+    name=fitted(view,name,NAME_WIDTH,15)
+    x=_center(view,x,[name,*rows],13)
+    view._text(name,x,y+name_dy,15,_color(slot.color),bold=True,align='center',opacity=opacity,family='ui')
+    for index,row in enumerate(rows):
+        view._text(row,x,y+.036+.032*index,13,INK,align='center',opacity=opacity,family='data')
+
+
 def paint_process_hud(view):
-    from .gpu_view import STATIONS
-    view._text('Lumo',.025,.025,20,QUIET,family='ui')
-    view._text('Program usage as % of system capacity',.025,.057,12,QUIET,family='ui')
+    snapshot=view.snapshot
+    view._text('Lumo',.025,.025,22,INK,bold=True,family='ui')
+    cpu=pct(snapshot.cpu) if getattr(snapshot,'cpu_ready',True) else DASH
+    status=f'Machine CPU {cpu}    GPU {pct(snapshot.gpu,0)}'
+    view._text(status,_center(view,.5,[status],13),.028,13,INK,align='center',family='data')
+    slots=build_slots(view.process_sources,snapshot)
+    for slot in slots:
+        _block(view,slot,short_name(slot.name,40) if slot.occupied else DASH,slot_rows(slot),
+               slot.opacity if slot.occupied else 1.)
+    # Outgoing identities keep their own name, fading with their cloud, one
+    # line above the incoming name; they never carry measurements.
+    by_slot={slot.slot:slot for slot in slots}
     for source in view.process_sources.sources:
-        if source.opacity<.08:
+        if source.closed_at is None or not source.cloud_enabled or source.opacity<.03:
             continue
-        sx,sy=STATIONS[source.slot][:2]
-        name=PROGRAM_NAMES.get(source.name,source.name)
-        name=fitted(view,name,.17,14)
-        x=.5+sx*view.height/(2*view.width)
-        # Keep the complete text block inside the window when resized.
-        x=max(.095,min(.905,x))
-        y=.5-sy/2+.10
-        color=tuple(round(c*255*.65+quiet*.35) for c,quiet in zip(source.color,QUIET))
-        alive=source.closed_at is None
-        cpu=f'{machine_cpu_percent(source.cpu,len(view.snapshot.cores)):.1f}%' if alive and source.cpu_ready else '—'
-        total=view.snapshot.ram_total
-        ram=f'{source.memory/total*100:.1f}%' if alive and total>0 else '—'
-        view._text(name,x,y,14,INK,align='center',opacity=source.opacity,family='ui')
-        # A small signal trace shows recent measurements, never a synthetic oscillator.
-        width=.20*view.height/view.width
-        baseline=y+.040
-        memory_color=tuple(round(value*.65+220*.35) for value in color)
-        view._line((x-width/2,baseline),(x+width/2,baseline),(*QUIET,round(45*source.opacity)))
-        history=list(view.process_history.get(id(source),()))
-        for metric,direction,trace_color in [(0,-1,color),(1,1,memory_color)]:
-            previous=None
-            for index,sample in enumerate(history):
-                value=sample[metric]
-                if value is None:
-                    previous=None
-                    continue
-                point=(x-width/2+(48-len(history)+index)*width/47,
-                       baseline+direction*.021*max(0.,min(1.,value)))
-                if previous is not None:
-                    view._line(previous,point,(*trace_color,round(210*source.opacity)))
-                previous=point
-        gap=.058*view.height/view.width
-        view._text('CPU '+cpu,x-gap,y+.067,12,color,align='center',opacity=source.opacity,family='data')
-        view._text('RAM '+ram,x+gap,y+.067,12,memory_color,align='center',opacity=source.opacity,family='data')
-        if not alive or not source.cpu_ready:
-            status='Ended' if not alive else 'Reading CPU…'
-            view._text(status,x,y+.090,11,QUIET,align='center',opacity=source.opacity,family='ui')
+        slot=by_slot.get(source.slot)
+        if slot is not None:
+            _block(view,slot,short_name(source.name,40),[],source.opacity,name_dy=-.032)
     if getattr(view,'capture_label',''):
-        view._text(view.capture_label,.5,.028,11,QUIET,align='center',family='ui')
+        view._text(view.capture_label,.5,.058,11,QUIET,align='center',family='ui')

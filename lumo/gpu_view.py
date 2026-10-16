@@ -15,8 +15,9 @@ from .shaders import (BACKGROUND_FRAGMENT, BACKGROUND_VERTEX, BLOOM_FRAGMENT, CO
                       LINK_FRAGMENT, PARTICLE_FRAGMENT, PARTICLE_VERTEX, POST_VERTEX)
 from .showcase import SCENES, ShowcaseState
 from .telemetry import LocalTelemetry, Snapshot
-from .activity import device_activity, machine_cpu_percent, motion_activity, flow_speed, program_flow_speed
+from .activity import device_activity, motion_activity, flow_speed, program_flow_speed
 from .process_sources import ProcessSources, SOURCE_COLORS
+from .process_visuals import build_slots
 from .packets import PacketPool
 from .core_rotation import CoreRotation
 from .process_hud import paint_process_hud
@@ -77,7 +78,9 @@ class GpuView:
         self.hud_texture = int(glGenTextures(1))
         self.hud_key = None
         self.metric_history={key:deque(maxlen=24) for key in ("cpu","gpu","ram","network","storage","disk")}
-        self.process_history={}
+        self.slot_visuals = ()
+        self.source_activity = {}
+        self.source_share = {}
         self.fonts: dict[tuple, pygame.font.Font] = {}
         self.cool = np.array(SCENES[state.mode][1], dtype=np.float32)
         self.warm = np.array(SCENES[state.mode][2], dtype=np.float32)
@@ -193,9 +196,9 @@ class GpuView:
 
     def _upload(self, name: str, positions: np.ndarray, colors: np.ndarray) -> None:
         data = np.ascontiguousarray(np.column_stack((positions, colors)), dtype=np.float32)
-        buffer = int(glGenBuffers(1))
+        buffer = self.buffers[name][0] if name in self.buffers else int(glGenBuffers(1))
         glBindBuffer(GL_ARRAY_BUFFER, buffer)
-        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
         self.buffers[name] = (buffer, len(data))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
@@ -275,6 +278,10 @@ class GpuView:
                 +sum(count for key,(_,count) in self.buffers.items() if key.startswith("packets_"))
                 +self.buffers["stars"][1]+self.buffers["core_ambient"][1])
 
+    def _slot_center(self, slot):
+        anchor=self.slot_visuals[slot].anchor
+        return ((anchor[0]*2.-1.)*self.aspect, 1.-anchor[1]*2.)
+
     def _configure(self, uniforms: dict, now: float) -> None:
         glUniformMatrix3fv(uniforms["uCoreRotation"],1,GL_FALSE,self.core_rotation.matrix.T.copy())
         glUniform1f(uniforms["uTime"],now)
@@ -302,20 +309,20 @@ class GpuView:
         glUniform1f(uniforms["uCloudAlpha"],1.)
         glUniform1f(uniforms["uCloudScale"],.235)
 
-    def _points(self, name: str, kind: int, glow: bool, center=(0.,0.)) -> None:
+    def _points(self, name: str, kind: int, glow: bool, center=(0.,0.), *, fraction=1.) -> None:
         glUniform1i(self.uniforms["uKind"],kind)
         glUniform1f(self.uniforms["uGlow"],float(glow))
         glUniform2f(self.uniforms["uCenter"],*center)
-        self._draw_buffer(name,GL_POINTS)
+        self._draw_buffer(name,GL_POINTS,fraction=fraction)
 
-    def _draw_buffer(self, name: str, mode: int) -> None:
+    def _draw_buffer(self, name: str, mode: int, *, fraction=1.) -> None:
         buffer,count=self.buffers[name]
         glBindBuffer(GL_ARRAY_BUFFER,buffer)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
         glVertexPointer(3,GL_FLOAT,24,ctypes.c_void_p(0))
         glColorPointer(3,GL_FLOAT,24,ctypes.c_void_p(12))
-        glDrawArrays(mode,0,count)
+        glDrawArrays(mode,0,round(count*max(0.,min(1.,fraction))))
         glDisableClientState(GL_VERTEX_ARRAY)
         glDisableClientState(GL_COLOR_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER,0)
@@ -334,17 +341,18 @@ class GpuView:
         dt=max(0.,now-self.last_time)
         self.last_time=now
         self.core_rotation.step(dt,now)
-        blend=1.-math.exp(-dt*1.8)
+        response_blend=1.-math.exp(-dt*1.8)
+        blend=response_blend
         if self.state.paused and self.state.mode!=self.last_mode:
             blend=1.
         self.last_mode=self.state.mode
         initializing=not self.loads_initialized
         target=np.array(device_activity(self.snapshot),dtype=np.float32)
-        if not self.loads_initialized or (self.state.paused and self.snapshot.updated!=old_reading):
+        if not self.loads_initialized:
             self.loads[:]=target
             self.loads_initialized=True
         else:
-            self.loads+=(target-self.loads)*blend
+            self.loads+=(target-self.loads)*response_blend
         # Integrate speed so live load changes never teleport the moving packets.
         activity=motion_activity(self.loads)
         self.flow_time+=dt*flow_speed(activity)
@@ -356,30 +364,41 @@ class GpuView:
             self.shape_activity=float(activity)
             self.shape_drift=math.atan2(float(self.loads[0]-self.loads[4])+.01,float(self.loads[1]-self.loads[5])+.01)
         cores=max(1,len(self.snapshot.cores))
-        grouped={}
-        for process in self.snapshot.process_details:
-            grouped[process.name]=grouped.get(process.name,0.)+max(0.,process.cpu)
-        speeds={name:program_flow_speed(machine_cpu_percent(cpu,cores)/100.)
-                for name,cpu in grouped.items()}
-        # Existing named sources respond to their own measured CPU. Unattributed I/O
-        # contributes only to the background source and the shared central current.
-        named=set(self.process_sources._live) if self.process_sources._initialized else set(
-            sorted(grouped,key=lambda name:grouped[name],reverse=True)[:self.process_sources.max_apps])
-        background_cpu=sum(cpu for name,cpu in grouped.items() if name not in named)
-        background=max(machine_cpu_percent(background_cpu,cores)/100.,.25*max(self.loads[1],self.loads[5]))
-        speeds["other processes"]=program_flow_speed(background)
         if not self.system_view:
-            self.process_sources.update(self.snapshot.process_details,now=now,flow_time=self.flow_time,
-                                        sampled_at=self.snapshot.updated,instant_emission=initializing,logical_cpus=cores,
-                                        source_speeds=speeds)
-            if self.snapshot.updated!=old_reading:
-                identities={id(source) for source in self.process_sources.sources}
-                self.process_history={key:history for key,history in self.process_history.items() if key in identities}
-                for source in self.process_sources.sources:
-                    history=self.process_history.setdefault(id(source),deque(maxlen=48))
-                    cpu=machine_cpu_percent(source.cpu,cores)/100. if source.cpu_ready and source.closed_at is None else None
-                    ram=source.memory/self.snapshot.ram_total if self.snapshot.ram_total>0 and source.closed_at is None else None
-                    history.append((cpu,ram))
+            # Sensor stamps drive ranking; animation time drives fades and flow.
+            # Stage ownership changes until resume, but refresh current labels.
+            if self.state.paused and self.process_sources._initialized:
+                groups={}
+                for process in {p.pid:p for p in self.snapshot.process_details}.values():
+                    groups.setdefault(process.name,[]).append(process)
+                for source in self.process_sources.live_sources:
+                    members=([p for name,group in groups.items()
+                              if name not in self.process_sources._live for p in group]
+                             if source.slot==5 else groups.get(source.name,[]))
+                    source.measure(members,cores)
+            else:
+                speeds={source.name:program_flow_speed(self.source_activity.get(id(source),0.))
+                        for source in self.process_sources.sources}
+                self.process_sources.update(self.snapshot.process_details,now=now,flow_time=self.flow_time,
+                                            sampled_at=self.snapshot.updated,instant_emission=initializing,
+                                            logical_cpus=cores,source_speeds=speeds)
+            if not self.state.paused or not self.slot_visuals:
+                self.slot_visuals=build_slots(self.process_sources,self.snapshot)
+            slots={slot.slot:slot for slot in self.slot_visuals}
+            active={id(source) for source in self.process_sources.sources}
+            self.source_activity={key:value for key,value in self.source_activity.items() if key in active}
+            self.source_share={key:value for key,value in self.source_share.items() if key in active}
+            for source in self.process_sources.sources:
+                identity=id(source)
+                if source.closed_at is not None:
+                    continue
+                slot=slots[source.slot]
+                target=slot.activity if slot.stream_enabled else 0.
+                previous=self.source_activity.get(identity,target if initializing else 0.)
+                self.source_activity[identity]=previous+(target-previous)*response_blend
+                share=(slot.worker_ram_share or 0.)/100.
+                previous=self.source_share.get(identity,share if initializing else 0.)
+                self.source_share[identity]=previous+(share-previous)*response_blend
         self.cool+=(np.array(SCENES[self.state.mode][1])-self.cool)*blend
         self.warm+=(np.array(SCENES[self.state.mode][2])-self.warm)*blend
         glBindFramebuffer(GL_FRAMEBUFFER,self.scene_fbo)
@@ -413,38 +432,54 @@ class GpuView:
             for source in self.process_sources.sources:
                 identity=id(source)
                 if identity not in self.packet_pools:
+                    if not source.pids or source.closed_at is not None:
+                        continue
                     self.packet_pools[identity]=PacketPool(source)
                 pool=self.packet_pools[identity]
-                if pool.update(source,dt,now):
+                if pool.update(source,dt,now, activity=self.source_activity.get(identity,0.),
+                               enabled=source.closed_at is None and bool(source.pids)):
                     for kind,(positions,colors) in pool.arrays().items():
                         key=f"packets_{identity}_{kind}"
-                        if key in self.buffers:
-                            glDeleteBuffers(1,[self.buffers.pop(key)[0]])
                         self._upload(key,positions,colors)
             for glow in (True,False):
                 self._points("core_ambient",32,glow)
                 for source in self.process_sources.sources:
                     slot=source.slot
                     index=slot%6
-                    x,y=STATIONS[slot][:2]
+                    x,y=self._slot_center(slot)
                     glUniform3f(self.uniforms["uNodeColor"],*source.color)
                     glUniform1f(self.uniforms["uEntry"],math.atan2(y,x+.025))
                     glUniform1f(self.uniforms["uBand"],SOURCE_BANDS[slot])
-                    glUniform1f(self.uniforms["uEmission"],source.render_emission)
+                    glUniform1f(self.uniforms["uEmission"],self.source_activity.get(id(source),0.))
                     glUniform1f(self.uniforms["uParticleTime"],source.flow_clock)
                     glUniform1f(self.uniforms["uBirthTime"],source.born_flow)
                     glUniform1f(self.uniforms["uStopTime"],source.stopped_flow if source.stopped_flow is not None else 1.e10)
-                    glUniform1f(self.uniforms["uCloudAlpha"],source.opacity)
-                    count=max(1,len(self.process_sources._live)+1)
-                    cloud_scale=.19 if count<=6 else .125
-                    resident=min(1.,source.memory/max(1.,self.snapshot.ram_total))
-                    glUniform1f(self.uniforms["uCloudScale"],cloud_scale*(.80+1.1*math.sqrt(resident)))
+                    occupied=self.slot_visuals[slot].occupied
+                    alpha=source.opacity if source.closed_at is not None or occupied else 0.
+                    glUniform1f(self.uniforms["uCloudAlpha"],alpha)
+                    activity=self.source_activity.get(id(source),0.)
+                    glUniform1f(self.uniforms["uCloudScale"],.15+.15*math.sqrt(activity))
                     for kind,shader in (("dust",29),("wake",31),("head",30)):
                         key=f"packets_{id(source)}_{kind}"
                         if key in self.buffers:self._points(key,shader,glow,(x,y))
                     self._points(f"station_dust_{index}",11,glow,(x,y))
                     self._points(f"station_{index}",11,glow,(x,y))
                     self._points(f"station_sparks_{index}",14,glow,(x,y))
+                    if slot==4 and source.closed_at is None:
+                        # A bounded subset marks worker RSS / machine used RAM.
+                        share=self.source_share.get(id(source),0.)
+                        glUniform3f(self.uniforms["uNodeColor"],*self.cool)
+                        self._points(f"station_{index}",11,glow,(x,y),fraction=share)
+                # Vacancies retain a faint cloud, without allocating a packet pool.
+                for slot in self.slot_visuals:
+                    if slot.occupied:
+                        continue
+                    x,y=self._slot_center(slot.slot)
+                    glUniform3f(self.uniforms["uNodeColor"],*slot.color)
+                    glUniform1f(self.uniforms["uCloudAlpha"],slot.cloud_opacity)
+                    glUniform1f(self.uniforms["uCloudScale"],.15)
+                    glUniform1f(self.uniforms["uParticleTime"],self.flow_time)
+                    self._points(f"station_{slot.slot}",11,glow,(x,y))
         glUseProgram(0)
         glDisable(GL_POINT_SPRITE)
         self._compose_light()
@@ -494,7 +529,8 @@ class GpuView:
     def _draw_hud(self) -> None:
         transitioning=any(0.<source.opacity<1. for source in self.process_sources.sources)
         key=(self.width,self.height,self.state.mode,self.state.reactive,self.state.paused,self.core_rotation.auto,self.system_view,self.snapshot.updated,getattr(self,"capture_label",""),
-             int(self.state.clock*20) if transitioning else None)
+             int(self.state.clock*20) if transitioning else None,
+             tuple((id(s),s.pids,s.opacity) for s in self.process_sources.sources))
         if key!=self.hud_key:
             self.hud_surface=pygame.Surface((self.width,self.height),pygame.SRCALPHA)
             self._paint_hud()

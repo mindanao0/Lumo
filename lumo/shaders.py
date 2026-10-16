@@ -1,4 +1,21 @@
-"""Parametric 3D silk, optical light scattering, and HDR compositing on the GPU."""
+"""Procedural process galaxy, connected silk, and HDR compositing.
+
+Process integration contract (GLSL 1.20, existing uniforms/buffers):
+* Kind 32 accepts the existing ellipsoid ambient samples and independent color.b
+  seeds; kinds 18-20 / 29-31 retain their phase / birth-clock packet encodings.
+* Arrival is 2.8 + .9*seed, transit 12 + 4*seed, fade 4 + 2*seed, in
+  uParticleTime units. CPU expiry scheduling must retain that complete lifetime.
+* processPath is position-continuous and tangent-matched at arrival (central
+  difference step .002); wake samples evaluate the same path at delayed ages.
+  Radii remain positive, logarithms are bounded, and normalization is guarded.
+* Start with identity uCoreRotation, uWorldScale=1 and the existing orthographic
+  camera. Galaxy tilt is built in. Integration should slow automatic trackball
+  rotation (or disable it initially) to keep the disk readable, rather than
+  continuously turning it edge-on. uFlowTime supplies gentle intrinsic rotation.
+* No new uniforms. uNodeColor remains attached to each packet through expiry;
+  uConnected=1 retains the original connected core/path and color branches.
+Real GL compilation, trajectory sampling and framebuffer review belong to t4/t5.
+"""
 
 PARTICLE_VERTEX = r"""
 #version 120
@@ -101,6 +118,10 @@ float processFadeTime(float seed) {return 4.+seed*2.;}
 float processLifetime(float seed) {
     return processArrival(seed)+processTransitTime(seed)+processFadeTime(seed);
 }
+// Both the ambient arms and captured streams use a shallow, tilted disk.
+vec3 galaxyPose(vec3 p) {
+    return uCoreRotation*rx(p,.38)+vec3(-.025,0.,0.);
+}
 vec3 processCurrent(float travel,float lane,float seed) {
     vec2 direction=-uCenter*inversesqrt(max(dot(uCenter,uCenter),.001));
     vec2 across=vec2(-direction.y,direction.x);
@@ -189,7 +210,7 @@ void main() {
         p=uCoreRotation*q;
         p.xy+=vec2(-.025,0.);
         float compute=max(uLoads[0],uLoads[4]);
-        alpha*=(.90+compute*.65)*(1.-smoothstep(.28+.64*compute-.025,.28+.64*compute+.025,seed));
+        alpha*=(2.2+compute*1.2)*(1.-smoothstep(.28+.64*compute-.025,.28+.64*compute+.025,seed));
         // Small bright points retain detail instead of merging into soft fog.
         float front=smoothstep(-.46,.46,p.z);
         alpha*=.18+1.12*front;
@@ -200,7 +221,7 @@ void main() {
         float landmark=smoothstep(.82,.97,dot(normalize(q+vec3(.0001)),normalize(vec3(.72,.35,.60))));
         alpha*=.45+1.65*crest+1.25*landmark;
         if(uGlow>.5) alpha*=.20;
-        size=1.5+seed*1.3;energy=.95+compute*.65;whiten=.08+.20*max(crest,landmark);vSpark=0.;
+        size=1.8+seed*1.5;energy=1.25+compute*.8;whiten=.08+.20*max(crest,landmark);vSpark=0.;
         warmth=smoothstep(-.3,.3,q.x);
     } else if(uKind==21 || uKind==22 || uKind==23) {
         // Points drift inward on spiral arms; the cloud itself keeps a stable pose.
@@ -248,7 +269,7 @@ void main() {
         alpha*=.65;size=1.6+seed*2.2;
     } else if(uKind==3) {
         p.xy+=vec2(sin(uTime*.025+seed*15.0),cos(uTime*.018+seed*19.0))*.012;
-        alpha*=.7+.3*sin(seed*41.0+uTime*.4);
+        alpha*=(.7+.3*sin(seed*41.0+uTime*.4))*(uConnected==1?1.:.22);
         size=1.0+seed*3.0;
         if(q.z>.91) {size=8.+seed*8.;alpha*=.12;}
         energy=.8;whiten=.12;
@@ -298,7 +319,7 @@ void main() {
             float distance=length(local/vec3(.60,.60,.53));
             float density=exp(-1.35*distance*distance)*(1.-smoothstep(.70,1.04,distance));
             float captured=smoothstep(processArrival(seed)-.30,processArrival(seed)+.40,age);
-            alpha*=mix(1.,density*1.6,captured);
+            alpha*=mix(1.,density*2.6,captured);
         }
         alpha*=headAge>=delay?1.:0.;
         if(uKind>=29) alpha*=1.-smoothstep(floor(q.z)-1.5,floor(q.z),uTime);
@@ -336,7 +357,7 @@ void main() {
     if(uKind==11 || uKind==14)
         vColor=mix(uNodeColor,vec3(.93,.98,1.),whiten)*energy;
     if(role==18 || role==19 || role==20 || uKind==24) {
-        vec3 sourceColor=uReactive==1?uNodeColor:mix(uCool,uWarm,seed);
+        vec3 sourceColor=(uConnected==0 || uReactive==1)?uNodeColor:mix(uCool,uWarm,seed);
         vColor=mix(sourceColor,vec3(.90,.97,1.),whiten)*energy;
     }
     vAlpha=alpha*(uGlow>.5?(vSpark<-.5?.08:.045):.90);
@@ -398,8 +419,8 @@ void main() {
     vec2 coarse=abs(fract(p/.30+.5)-.5);
     float crossMark=exp(-coarse.x*160.)*exp(-coarse.y*160.);
     float bluePrint=(grid*.22+crossMark*.70)*(1.-exp(-dot(p,p)*2.));
-    vec3 color=vec3(.004,.010,.019)+uCool*mist*.017+uWarm*side*.007
-        +vec3(.06,.20,.32)*bluePrint+vec3(grain*.002);
+    vec3 color=vec3(.001,.002,.004)+uCool*mist*.003+uWarm*side*.001
+        +vec3(.012,.035,.055)*bluePrint*.12+vec3(grain*.0006);
     gl_FragColor=vec4(color*opening,1.0);
 }
 """
