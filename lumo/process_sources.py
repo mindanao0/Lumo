@@ -1,4 +1,11 @@
-"""Live program groups with stable slots, cloud transitions, and draining particles."""
+"""CPU-ranked live ownership, with separate outgoing render identities.
+
+Default: five ranked groups in slots 0..4 and remainder in slot 5.
+Reduced capacities use the first N slots. Explicit names preserve caller order
+and bypass ranking; legacy capacities up to 13 skip reserved Other slot 5.
+CPU margins use whole-machine percentage points. A gap over two seconds breaks
+observed evidence rather than crediting an unobserved interval.
+"""
 from dataclasses import dataclass, field
 import math
 import time
@@ -12,6 +19,11 @@ SOURCE_COLORS = ((.16,.65,1.), (.14,.91,.86), (.72,.42,1.),
 APP_SLOTS = tuple(index for index in range(len(SOURCE_COLORS)) if index != 5)
 CLOUD_FADE_SECONDS = 3.
 PARTICLE_DRAIN_SECONDS = 34.
+RANK_INTERVAL_SECONDS = 1.
+RANK_HOLD_SECONDS = 3.
+RANK_MARGIN_POINTS = 3.
+MAX_SAMPLE_GAP_SECONDS = 2.
+MAX_RETIRING_PER_SLOT = 12
 
 
 def _positive(value: float) -> float:
@@ -46,7 +58,7 @@ class ProcessSource:
     def measure(self, members: list[ProcessReading], logical_cpus: int = 1) -> None:
         self.pids = tuple(sorted(p.pid for p in members))
         self.cpu = sum(_positive(p.cpu) for p in members)
-        self.cpu_ready = bool(members) and any(p.cpu_ready for p in members)
+        self.cpu_ready = bool(members) and all(p.cpu_ready for p in members)
         self.memory = sum(_positive(p.memory) for p in members)
         self.emission = min(1.,self.cpu/(100.*max(1,logical_cpus))) if members and self.cpu_ready else 0.
 
@@ -54,15 +66,14 @@ class ProcessSource:
 @dataclass
 class ProcessSources:
     names: list[str] = field(default_factory=list)
-    max_apps: int = 13
+    max_apps: int = 5
     sources: list[ProcessSource] = field(default_factory=list)
     _live: dict[str, ProcessSource] = field(default_factory=dict)
     _retiring: list[ProcessSource] = field(default_factory=list)
     _background: ProcessSource | None = None
-    _previous: dict[str, set[int]] = field(default_factory=dict)
-    _pending: dict[str, int] = field(default_factory=dict)
-    _colors: dict[str, tuple[float, float, float]] = field(default_factory=dict)
-    _slots: dict[str, int] = field(default_factory=dict)
+    _pending: dict[tuple[str, str], float] = field(default_factory=dict)
+    _last_rank: float | None = None
+    _evidence_sample: float | None = None
     _initialized: bool = False
     _last_sample: float | None = None
     _last_frame: float | None = None
@@ -71,9 +82,20 @@ class ProcessSources:
         if not 1 <= self.max_apps <= len(APP_SLOTS):
             raise ValueError(f"max_apps must be between 1 and {len(APP_SLOTS)}")
 
+    @property
+    def live_sources(self) -> tuple[ProcessSource, ...]:
+        """Current PID owners, including Other; excludes outgoing identities."""
+        return tuple(sorted([*self._live.values(),
+                             *([self._background] if self._background else [])],
+                            key=lambda source: source.slot))
+
+    @property
+    def retiring_sources(self) -> tuple[ProcessSource, ...]:
+        """Outgoing object identities for renderers; never allow new births."""
+        return tuple(self._retiring)
+
     def _create(self, name: str, slot: int, now: float, flow: float, initial: bool) -> ProcessSource:
-        color = self._colors.setdefault(name, SOURCE_COLORS[slot])
-        self._slots[name] = slot
+        color = SOURCE_COLORS[slot]
         source = ProcessSource(name, slot=slot, color=color, born_at=now-3. if initial else now,
                                born_flow=flow-40. if initial else flow, opacity=1. if initial else 0., flow_clock=flow)
         self._live[name] = source
@@ -93,58 +115,67 @@ class ProcessSources:
                 target = source_speeds.get(source.name,.15)
                 source.flow_speed += (target-source.flow_speed)*speed_blend
                 source.flow_clock += dt*source.flow_speed
-        fresh = sampled_at is None or sampled_at != self._last_sample
+        fresh = sampled_at is None or self._last_sample is None or sampled_at > self._last_sample
         if fresh:
             self._last_sample = sampled_at
             # Count each PID once even if a caller supplies a duplicated reading.
             groups: dict[str, list[ProcessReading]] = {}
             for process in {p.pid: p for p in readings}.values():
                 groups.setdefault(process.name, []).append(process)
-            ranked = sorted(groups, key=lambda name: (
-                sum(_positive(p.cpu) for p in groups[name]),
-                sum(_positive(p.memory) for p in groups[name])), reverse=True)
-            eligible = {name for name,members in groups.items() if any(_positive(p.memory)>0. for p in members)}
-            if not self._initialized and groups:
-                chosen = [name for name in self.names if name in eligible] if self.names else [name for name in ranked if name in eligible][:self.max_apps]
-                for slot, name in zip(APP_SLOTS[:self.max_apps], chosen):
-                    self._create(name, slot, now, flow, True)
-                self._initialized = True
-            elif self._initialized:
-                for name, source in list(self._live.items()):
-                    if name not in groups:
-                        source.closed_at, source.stopped_flow = now, source.flow_clock
-                        source.pids, source.cpu, source.memory, source.emission = (), 0., 0., 0.
-                        self._retiring.append(source)
-                        del self._live[name]
-                # Two distinct sensor polls must see a new name/PID before promotion.
-                for name, members in groups.items():
-                    if name in self._live or name not in eligible:
-                        continue
-                    pids = {p.pid for p in members}
-                    event = bool(pids-self._previous.get(name,set()))
-                    if name in self._pending:
-                        self._pending[name] += 1
-                    elif event:
-                        self._pending[name] = 1
-                self._pending = {name: count for name,count in self._pending.items() if name in eligible and name not in self._live}
-                for name in ranked:
-                    if self._pending.get(name,0) < 2 or len(self._live) >= self.max_apps:
-                        continue
-                    reserved = {source.slot for source in self._live.values()}
-                    reserved.update(source.slot for source in self._retiring
-                                    if source.cloud_enabled and now-source.closed_at < CLOUD_FADE_SECONDS and source.name != name)
-                    free = [slot for slot in APP_SLOTS[:self.max_apps] if slot not in reserved]
-                    if not free:
-                        continue
-                    slot = self._slots.get(name,free[0])
-                    if slot not in free:
-                        slot = free[0]
+            stamp = now if sampled_at is None else sampled_at
+            cpus = {name: sum(_positive(p.cpu) for p in members if p.cpu_ready)
+                    / max(1, logical_cpus) for name, members in groups.items()}
+            eligible = {name for name, members in groups.items()
+                        if any(_positive(p.memory) > 0. for p in members)}
+            ranked = sorted(eligible, key=lambda name: (-cpus[name], name))
+            ordered = [s.name for s in sorted(self._live.values(), key=lambda s: s.slot)
+                       if s.name in eligible]
+            if self.names:
+                chosen = [name for name in dict.fromkeys(self.names) if name in eligible][:self.max_apps]
+            elif not self._initialized:
+                chosen = ranked[:self.max_apps]
+            else:
+                chosen = ordered[:]
+                # Missing groups release ownership immediately. Vacancies have no
+                # incumbent to protect; fill them in current CPU order.
+                chosen += [n for n in ranked if n not in chosen][:self.max_apps-len(chosen)]
+                ready = {n for n in eligible if all(p.cpu_ready for p in groups[n])}
+                advantages = {(a, b) for a in ready for b in ready
+                              if cpus[a] >= cpus[b] + RANK_MARGIN_POINTS}
+                continuous = (self._evidence_sample is not None and
+                              0. < stamp-self._evidence_sample <= MAX_SAMPLE_GAP_SECONDS)
+                self._pending = {pair: since for pair, since in self._pending.items()
+                                 if pair in advantages and continuous}
+                for pair in advantages:
+                    self._pending.setdefault(pair, stamp)
+                if self._last_rank is None or stamp-self._last_rank >= RANK_INTERVAL_SECONDS:
+                    self._last_rank = stamp
+                    # Insertion through the committed order applies the same
+                    # pairwise evidence to internal reversals and admissions.
+                    candidates = chosen + [n for n in ranked if n not in chosen]
+                    for i in range(1, len(candidates)):
+                        j = i
+                        while j and stamp-self._pending.get((candidates[j], candidates[j-1]), stamp) >= RANK_HOLD_SECONDS:
+                            candidates[j-1], candidates[j] = candidates[j], candidates[j-1]
+                            j -= 1
+                    chosen = candidates[:self.max_apps]
+            self._evidence_sample = stamp
+            initial = not self._initialized
+            desired = dict(zip(chosen, APP_SLOTS[:self.max_apps]))
+            for name, source in list(self._live.items()):
+                if desired.get(name) != source.slot:
+                    source.closed_at, source.stopped_flow = now, source.flow_clock
+                    source.pids, source.cpu, source.memory, source.emission = (), 0., 0., 0.
+                    self._retiring.append(source)
+                    del self._live[name]
+            for name, slot in desired.items():
+                if name not in self._live:
+                    # At most one visible outgoing cloud per position.
                     for old in self._retiring:
-                        if old.slot == slot:
+                        if old.slot == slot and old.closed_at != now:
                             old.cloud_enabled = False
-                    self._create(name,slot,now,flow,False)
-                    del self._pending[name]
-            self._previous = {name: {p.pid for p in members} for name,members in groups.items() if name in eligible}
+                    self._create(name, slot, now, flow, initial)
+            self._initialized = True
             for name, source in self._live.items():
                 source.measure(groups[name],logical_cpus)
                 if source.opacity == 0. or instant_emission:
@@ -162,7 +193,11 @@ class ProcessSources:
             source.render_emission += (source.emission-source.render_emission)*blend
         for source in self._retiring:
             source.opacity = 1.-_ease((now-source.closed_at)/CLOUD_FADE_SECONDS) if source.cloud_enabled else 0.
-        self._retiring = [source for source in self._retiring if source.flow_clock-source.stopped_flow < PARTICLE_DRAIN_SECONDS]
+        self._retiring = [source for source in self._retiring
+                          if source.flow_clock-source.stopped_flow < PARTICLE_DRAIN_SECONDS
+                          and now-source.closed_at < 180.]
+        self._retiring = [source for slot in APP_SLOTS
+                          for source in [s for s in self._retiring if s.slot == slot][-MAX_RETIRING_PER_SLOT:]]
         if self._background is not None:
             self._background.render_emission += (self._background.emission-self._background.render_emission)*blend
         self.sources = sorted([*self._live.values(),*self._retiring,*([self._background] if self._background else [])],key=lambda source: source.slot)
